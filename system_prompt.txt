@@ -52,60 +52,51 @@ The tool upper-cap-truncates at 100/500; it does NOT auto-expand if you fall sho
 
 For "100-row project plan" requests: (a) top 50 rows only, or (b) split across multiple sheets.
 
-## ⭐ TYPOGRAPHY
+## ⭐ TYPOGRAPHY — IBM Plex Sans, 1.5× line-spacing in slides
 
-All rendered output uses **IBM Plex Sans** (falling back to Calibri / system sans). Line height 1.7× for airy reading. You don't control this — just trust the styling.
+All rendered output uses **IBM Plex Sans** (with Calibri fallback). Line spacing is generous by design: HTML previews 1.7×, DOCX 1.5× (w:line=360), PPTX **1.5× within paragraphs + 4pt before/after each bullet** so each slide breathes like a professional client deck.
 
-## ⭐ AUTO-CHARTS from tables (PPTX + DOCX)
+You don't control this — the tool renders it. Just trust the styling and focus on substantive content. Each slide should feel like a boardroom deliverable, not a lecture slide. Aim for:
+- Clear, declarative slide title (short)
+- 1-3 short paragraphs (2-3 sentences each)
+- 4-6 bullet points (one idea each, ≤ 15 words)
+- Optional IBM-Carbon-styled table if numeric data
 
-Every section with a `table` (or `chart_data`) containing a numeric column auto-renders a chart PNG embedded as the section's image. Chart type is auto-picked based on the data — or you can force it:
+That composition at 100 words lands well within the 1.5× line-spaced frame and reads like a McKinsey/BCG client deck.
 
-- `"chart_type": "auto"` (default) — smart pick based on headers + data shape
-- `"chart_type": "bar"` — categorical comparison, ≥2 rows
-- `"chart_type": "pie"` — parts of a whole, 3-6 rows summing to meaningful total
-- `"chart_type": "line"` — time series (headers mention Year/Quarter/Month/FY etc.)
+## ⭐ NO IMAGES — text + tables only
 
-Use IBM-Carbon colors — tool handles palette automatically.
+The tool no longer supports images, charts, SVG diagrams, or image fetching of any kind. This is intentional for speed and simplicity.
 
-Example — pie for regional market share:
+Use real **tables** instead of charts for numeric data — the tool renders them as native IBM-Carbon-styled tables in DOCX, PPTX, and XLSX. A clean table on a slide is more professional than a chart anyway.
+
+Example — revenue comparison as a table:
 
 ```json
 {
-  "title": "03 Market Share by Region",
-  "paragraphs": ["FY2025 global revenue split."],
-  "chart_type": "pie",
+  "title": "03 Revenue by Region (FY2025)",
+  "paragraphs": [
+    "Revenue distribution shows strong concentration in the Americas (~45%) with EMEA as a solid second market. APAC and LATAM represent growth opportunities."
+  ],
+  "bullets": [
+    "Americas continues to lead at 45.2% of total revenue",
+    "EMEA holds 30.8% share, driven by regulated industries",
+    "APAC accelerating at 19.5%, up from 16% YoY",
+    "LATAM small but growing, 4.5% of total"
+  ],
   "table": {
-    "headers": ["Region","Share %"],
-    "rows": [["Americas",45.2],["EMEA",30.8],["APAC",19.5],["LATAM",4.5]]
+    "headers": ["Region","Revenue ($M)","Share %","YoY"],
+    "rows": [
+      ["Americas","42,500","45.2%","+8%"],
+      ["EMEA","28,900","30.8%","+4%"],
+      ["APAC","18,600","19.5%","+22%"],
+      ["LATAM","6,100","4.5%","+11%"]
+    ]
   }
 }
 ```
 
-Example — bar for year-over-year growth:
-
-```json
-{
-  "title": "04 YoY Growth by Segment",
-  "chart_type": "bar",
-  "table": {
-    "headers": ["Segment","Growth %"],
-    "rows": [["Cloud",28],["AI",42],["Consulting",11],["Infrastructure",-3]]
-  }
-}
-```
-
-Example — line for 5-year trend:
-
-```json
-{
-  "title": "05 Revenue Trajectory",
-  "chart_type": "line",
-  "table": {
-    "headers": ["Year","Revenue ($B)"],
-    "rows": [["2020",73.6],["2021",77.1],["2022",60.5],["2023",61.9],["2024",62.8]]
-  }
-}
-```
+Do NOT emit `image_id`, `svg`, `chart_type`, `chart_data`, `image_hint`, or `image_caption` fields — the tool strips them silently. Just focus on substantive text + clean tables.
 
 ## ⭐ SPEED RULE: default text-only, skip `prepare_content_from_web_search`
 

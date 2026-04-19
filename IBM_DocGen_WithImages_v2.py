@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 17:50 IST (ETA countdown, mandatory 100w/slide 450w/page, "info not available" fill)
+# Last synced to OWUI DB: 2026-04-19 18:20 IST (image-logic stripped; IBM logo 1cm on PPTX/DOCX/XLSX; page numbers L-logo R-pagenum)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -1770,13 +1770,27 @@ class Tools:
                 await self._emit(__event_emitter__,
                     f"⚠️ {len(missing_images)} image(s) expired/missing — continuing without them")
 
-            # Auto-inject bar charts for sections whose table has a numeric column
-            # and no existing image. Applies to DOCX and PPTX (not XLSX which IS the data).
-            if format in ("docx", "pptx"):
-                resolved_sections = self._autoinject_charts(resolved_sections)
+            # IMAGE LOGIC REMOVED (2026-04-19 user policy v4): all inline images,
+            # auto-charts, SVG rasterization are stripped. Documents are text + tables
+            # only. Tables render as native tables (not charts). IBM logo on cover
+            # and footer remains as a static asset.
+            # Strip any image hints the LLM may have emitted so downstream renderers
+            # skip the image-insertion path entirely.
+            stripped = []
+            for s in resolved_sections:
+                if isinstance(s, dict):
+                    clean = {k: v for k, v in s.items()
+                             if k not in ("image_id", "svg", "_img_bytes",
+                                          "_img_width", "_img_height", "_img_source",
+                                          "image_caption", "chart_type", "chart_data",
+                                          "image_hint")}
+                    stripped.append(clean)
+                else:
+                    stripped.append(s)
+            resolved_sections = stripped
 
             # Enforce content caps per format:
-            #   PPTX: 80 words/slide, DOCX: 300 words/page, XLSX: 50 rows/sheet
+            #   PPTX: 100 words/slide, DOCX: 500 words/page, XLSX: 50 rows/sheet
             resolved_sections = self._enforce_content_caps(resolved_sections, format)
 
             if format == "docx":
@@ -4732,7 +4746,8 @@ class Tools:
             lw, lh = self._get_ibm_logo_dims()
             # 1/5 of the previous 0.5-inch tall → ~0.1 inch tall, width by aspect.
             # Requested: smaller, left-aligned IBM mark on every page.
-            footer_h_emu = 91440  # 0.1 inch
+            # 1cm x 1cm per user policy (1 cm = 360,000 EMU)
+            footer_h_emu = 360000  # 1 cm
             footer_w_emu = int(footer_h_emu * (lw / max(lh, 1)))
             rel_entries.append(
                 '<Relationship Id="rIdFooter" '
@@ -4748,7 +4763,8 @@ class Tools:
                 'Target="media/ibm_logo_black.png"/>'
                 '</Relationships>'
             )
-            # Footer content: right-aligned logo.
+            # Footer content: left-aligned IBM logo + right-aligned page number.
+            # Use a tab-stop to push the page number to the right edge.
             footer_xml = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -4756,7 +4772,10 @@ class Tools:
                 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
                 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
                 'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
-                '<w:p><w:pPr><w:jc w:val="left"/></w:pPr>'
+                '<w:p>'
+                # Tab stops: logo on left, page number on right (at 9360 twentieths = 6.5 inch)
+                '<w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs></w:pPr>'
+                # IBM logo
                 '<w:r><w:drawing>'
                 f'<wp:inline distT="0" distB="0" distL="0" distR="0">'
                 f'<wp:extent cx="{footer_w_emu}" cy="{footer_h_emu}"/>'
@@ -4771,7 +4790,25 @@ class Tools:
                 '<pic:spPr><a:xfrm><a:off x="0" y="0"/>'
                 f'<a:ext cx="{footer_w_emu}" cy="{footer_h_emu}"/></a:xfrm>'
                 '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
-                '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>'
+                '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+                # Tab, then page number
+                '<w:r><w:tab/></w:r>'
+                '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
+                '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
+                '<w:t xml:space="preserve">Page </w:t></w:r>'
+                # w:fldSimple with PAGE field
+                '<w:fldSimple w:instr=" PAGE ">'
+                '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
+                '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
+                '<w:t>1</w:t></w:r></w:fldSimple>'
+                '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
+                '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
+                '<w:t xml:space="preserve"> of </w:t></w:r>'
+                '<w:fldSimple w:instr=" NUMPAGES ">'
+                '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
+                '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
+                '<w:t>1</w:t></w:r></w:fldSimple>'
+                '</w:p>'
                 '</w:ftr>'
             )
             footer_ref_xml = '<w:footerReference w:type="default" r:id="rIdFooter"/>'
@@ -5212,6 +5249,38 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             ws["A1"] = title
             ws["A2"] = f"Prepared for {client_name}"
 
+        # IBM logo (1cm × 1cm) — top-left of every sheet; sheet title + page label right.
+        try:
+            from openpyxl.drawing.image import Image as _XLImg
+            logo_png = self._get_ibm_logo_png()
+            if logo_png:
+                for sheet_idx, sn in enumerate(wb.sheetnames, start=1):
+                    ws = wb[sn]
+                    # Write logo to a temp BytesIO path for openpyxl
+                    try:
+                        img_buf = io.BytesIO(logo_png)
+                        img_buf.name = "ibm_logo.png"  # openpyxl sniffs extension
+                        xlimg = _XLImg(img_buf)
+                        # 1 cm ≈ 37.8 px at 96 DPI
+                        xlimg.width = 38
+                        xlimg.height = 38
+                        xlimg.anchor = "A1"
+                        ws.add_image(xlimg)
+                    except Exception as e:
+                        print(f"[DocGen] XLSX logo insert failed for '{sn}': {e}")
+                    # Sheet page number label in the top-right of the sheet view (header-ish row)
+                    try:
+                        # Put "Sheet N / M — <title>" in header row Z1 so it's visible when scrolling
+                        from openpyxl.styles import Font as _XLFont
+                        total = len(wb.sheetnames)
+                        label_cell = ws.cell(row=1, column=26, value=f"Sheet {sheet_idx} / {total}")
+                        label_cell.font = _XLFont(name="IBM Plex Sans", size=9, italic=True, color="525252")
+                        label_cell.alignment = __import__("openpyxl").styles.Alignment(horizontal="right")
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[DocGen] XLSX logo feature failed: {e}")
+
         # Serialize
         buf = io.BytesIO()
         wb.save(buf)
@@ -5647,7 +5716,7 @@ function showTab(i){{
                 f'<p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>'
                 f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>'
                 f'<p:txBody><a:bodyPr wrap="square" anchor="t"/><a:lstStyle/>'
-                f'<a:p><a:pPr algn="{align}"/>'
+                f'<a:p><a:pPr algn="{align}"><a:lnSpc><a:spcPct val="150000"/></a:lnSpc><a:spcBef><a:spcPts val="300"/></a:spcBef><a:spcAft><a:spcPts val="300"/></a:spcAft></a:pPr>'
                 + txt_run(text, size=size, bold=bold, color=color)
                 + '</a:p></p:txBody></p:sp>'
             )
@@ -5656,7 +5725,7 @@ function showTab(i){{
             body = ""
             for b in bullets:
                 body += (
-                    f'<a:p><a:pPr marL="285750" indent="-285750"><a:buChar char="•"/></a:pPr>'
+                    f'<a:p><a:pPr marL="285750" indent="-285750"><a:lnSpc><a:spcPct val="150000"/></a:lnSpc><a:spcBef><a:spcPts val="400"/></a:spcBef><a:spcAft><a:spcPts val="400"/></a:spcAft><a:buChar char="•"/></a:pPr>'
                     + txt_run(str(b), size=size) + '</a:p>'
                 )
             return (
@@ -5706,8 +5775,9 @@ function showTab(i){{
             media_files.append((logo_fname, logo_png))
             lw, lh = self._get_ibm_logo_dims()
             # 1/5 of previous 0.5-inch tall, placed at bottom-LEFT per request.
-            logo_h_emu = 91440  # 0.1in
-            logo_w_emu = int(logo_h_emu * (lw / max(lh, 1)))
+            # 1cm x 1cm per user policy (1 cm = 360,000 EMU since 914400 EMU/inch and 2.54 cm/inch)
+            logo_h_emu = 360000  # 1 cm
+            logo_w_emu = int(logo_h_emu * (lw / max(lh, 1)))  # keep aspect ratio, so width ~ 1cm if logo is square-ish
             logo_x_emu = 228600  # 0.25in left margin
             logo_y_emu = SLIDE_H_EMU - logo_h_emu - 114300  # 0.125in bottom margin
 
@@ -5779,10 +5849,13 @@ function showTab(i){{
             if paras or bullets:
                 body = ""
                 for p in paras:
-                    body += f'<a:p><a:pPr algn="l"/>' + txt_run(p, size=1400) + '</a:p>'
+                    body += f'<a:p><a:pPr algn="l"><a:lnSpc><a:spcPct val="150000"/></a:lnSpc><a:spcBef><a:spcPts val="300"/></a:spcBef><a:spcAft><a:spcPts val="300"/></a:spcAft></a:pPr>' + txt_run(p, size=1400) + '</a:p>'
                 for b in bullets:
                     body += (
                         f'<a:p><a:pPr marL="285750" indent="-285750" algn="l">'
+                        f'<a:lnSpc><a:spcPct val="150000"/></a:lnSpc>'
+                        f'<a:spcBef><a:spcPts val="400"/></a:spcBef>'
+                        f'<a:spcAft><a:spcPts val="400"/></a:spcAft>'
                         f'<a:buChar char="•"/></a:pPr>' + txt_run(str(b), size=1400) + '</a:p>'
                     )
                 shapes.append(
@@ -5831,6 +5904,14 @@ function showTab(i){{
             logo_xml = logo_shape_and_rel(slide_rel_entries)
             if logo_xml:
                 shapes.append(logo_xml)
+            # Page number — bottom-right corner of every slide.
+            page_num_text = f"{slide_num} / {len(sections) + 1}"
+            page_num_x = SLIDE_W_EMU - 914400 - 228600   # 1" wide, 0.25" right margin
+            page_num_y = SLIDE_H_EMU - 457200 - 114300   # 0.5" tall, 0.125" bottom margin
+            shapes.append(txt_box(
+                page_num_x, page_num_y, 914400, 457200,
+                page_num_text, size=900, color="8D8D8D", align="r",
+            ))
             slide_content = "".join(shapes)
             slides_xml.append((f"slide{slide_num}", slide_content, slide_rel_entries))
 

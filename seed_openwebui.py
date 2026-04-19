@@ -221,47 +221,9 @@ SPECS = [
             "required": ["session_id", "format", "title", "client_name", "sections_json"],
         },
     },
-    {
-        "name": "generate_image",
-        "description": (
-            "Generate or fetch ONE image for a document section. Returns a display_id "
-            "(e.g. IMG42831) that you then reference as image_id in sections_json. "
-            "Routing: kind='photo' → web search (Google/Wikimedia) — best for real places, "
-            "landmarks, products, logos (e.g. 'Mysore Palace', 'Red Fort Delhi', 'IBM logo'). "
-            "kind='illustration' → MCP image-generator (if configured) then falls back to web search "
-            "— best for abstract concepts. kind='auto' routes automatically from the prompt."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "prompt": {"type": "string", "description": "Subject to generate/find (e.g. 'Mysore Palace at dusk', 'futuristic smart city skyline', 'IBM Consulting logo')."},
-                "kind": {"type": "string", "enum": ["auto", "photo", "illustration"], "description": "photo=web search; illustration=MCP image-gen; auto=heuristic."},
-                "caption_hint": {"type": "string", "description": "Optional ~20-word caption. If omitted, one is generated from the prompt."},
-            },
             "required": ["prompt"],
         },
     },
-    {
-        "name": "enrich_sections_with_images",
-        "description": (
-            "BATCH image enrichment for a curated SUBSET of sections (not all). "
-            "Image-count rule: ceil(n_sections / 5) — a 5-slide deck gets 1 image, "
-            "10 slides get 2, 15 slides get 3, etc. This keeps latency low. "
-            "Sections you mark with 'image_hint' get priority; the rest are evenly "
-            "sampled. Sources: Google -> Wikipedia -> Wikimedia -> DuckDuckGo -> "
-            "IBM Carbon placeholder. Always succeeds (placeholder is last resort)."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "sections_json": {
-                    "type": "string",
-                    "description": (
-                        "JSON array of draft section objects. Add 'image_hint' on "
-                        "the sections you most want images on — those are prioritised "
-                        "within the image quota."
-                    ),
-                },
                 "default_kind": {
                     "type": "string",
                     "enum": ["auto", "photo", "illustration"],
@@ -275,27 +237,6 @@ SPECS = [
             "required": ["sections_json"],
         },
     },
-    {
-        "name": "render_visualization",
-        "description": (
-            "Render an interactive SVG/HTML visualization inline in the chat. "
-            "Use for architecture diagrams, flow charts, process maps, KPI dashboards. "
-            "The LLM supplies the SVG markup; the tool wraps it with IBM Carbon theming, "
-            "dark-mode support, and SVG/PNG/JPG download buttons. "
-            "Design system available to your SVG: utility classes .t .ts .th .box .arr .leader .node, "
-            "and color-ramp classes .c-purple .c-teal .c-coral .c-pink .c-gray .c-blue .c-green .c-amber .c-red."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "html_code": {
-                    "type": "string",
-                    "description": (
-                        "Raw SVG or HTML fragment. Do NOT wrap in <html>/<head>/<body>. "
-                        "For SVG, include viewBox (e.g. 'viewBox=\"0 0 1200 700\"'). "
-                        "Apply color ramps on a parent <g class=\"c-blue\">...</g>."
-                    ),
-                },
                 "title": {"type": "string", "description": "Short title for the diagram."},
             },
             "required": ["html_code"],
