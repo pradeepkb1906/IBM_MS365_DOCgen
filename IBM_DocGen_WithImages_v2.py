@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 17:05 IST (speed: no-retry HTTP, 8s enrich timeout, disable-enrichment valve)
+# Last synced to OWUI DB: 2026-04-19 17:20 IST (caps 80/300/50, disable_enrichment default True, auto-chart from tables)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -867,8 +867,8 @@ class Tools:
             description="When source is web/DuckDuckGo and the query was targeted (e.g. 'Red Fort Delhi'), skip the vision-ranking round-trip — trust the search. Big latency win.",
         )
         disable_image_enrichment: bool = Field(
-            default=False,
-            description="When TRUE, enrich_sections_with_images returns immediately with all sections text-only — no web image fetch, no placeholder generation. Use this if image fetching is your latency bottleneck. Users can still explicitly request images and the LLM can call generate_image() for one hero image.",
+            default=True,
+            description="DEFAULT TRUE. enrich_sections_with_images returns immediately with text-only sections — no web fetch, no placeholder. Latency win: ~15-40s saved per deck. When the user explicitly asks for images ('with photos', 'include visuals'), the LLM can still call generate_image() for ONE hero image. Flip to False to auto-enrich every deck again.",
         )
         security_level: Literal["strict", "balanced", "none"] = Field(default="strict")
         vision_rank_enabled: bool = Field(
@@ -1770,8 +1770,13 @@ class Tools:
                 await self._emit(__event_emitter__,
                     f"⚠️ {len(missing_images)} image(s) expired/missing — continuing without them")
 
+            # Auto-inject bar charts for sections whose table has a numeric column
+            # and no existing image. Applies to DOCX and PPTX (not XLSX which IS the data).
+            if format in ("docx", "pptx"):
+                resolved_sections = self._autoinject_charts(resolved_sections)
+
             # Enforce content caps per format:
-            #   PPTX: 40 words/slide, DOCX: 200 words/page, XLSX: 50 rows/sheet
+            #   PPTX: 80 words/slide, DOCX: 300 words/page, XLSX: 50 rows/sheet
             resolved_sections = self._enforce_content_caps(resolved_sections, format)
 
             if format == "docx":
@@ -5219,13 +5224,116 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 
         return self._render_xlsx_preview(title, client_name, sheets, data_uri)
 
-    # Hard content caps (2026-04-19 user policy: keep deck short, punchy, fast):
-    #   PPTX = 40 words per slide   (title + paragraphs + bullets combined)
-    #   DOCX = 200 words per page   (paragraphs + bullets combined)
+    # Hard content caps (2026-04-19 user policy):
+    #   PPTX = 80 words per slide   (title + paragraphs + bullets combined)
+    #   DOCX = 300 words per page   (paragraphs + bullets combined)
     #   XLSX = 50 rows per sheet    (data rows, header excluded)
-    MAX_WORDS_PPTX = 40
-    MAX_WORDS_DOCX = 200
+    MAX_WORDS_PPTX = 80
+    MAX_WORDS_DOCX = 300
     MAX_ROWS_XLSX = 50
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Auto-chart from table data
+    # ──────────────────────────────────────────────────────────────────────
+    def _table_has_numeric_column(self, table: dict) -> Optional[int]:
+        """Return the index of the FIRST non-header column whose values are all
+        numeric. Returns None if no such column. Used to decide if a section's
+        table is chartable."""
+        if not isinstance(table, dict): return None
+        rows = table.get("rows") or []
+        headers = table.get("headers") or []
+        if not rows or not headers or len(headers) < 2:
+            return None
+        # Check each non-first column for all-numeric values
+        for col_idx in range(1, len(headers)):
+            numeric_count = 0
+            for row in rows:
+                if col_idx >= len(row): continue
+                v = row[col_idx]
+                try:
+                    # Strip currency/percent symbols + commas
+                    s = str(v).strip().replace(",", "").replace("$", "").replace("%", "").replace("₹", "").replace("€", "")
+                    float(s)
+                    numeric_count += 1
+                except (ValueError, TypeError):
+                    pass
+            if numeric_count >= max(2, int(len(rows) * 0.7)):
+                return col_idx
+        return None
+
+    def _chart_png_from_table(self, table: dict, section_title: str = "") -> Optional[bytes]:
+        """Render a bar chart PNG from a numeric table column. Returns bytes or None."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return None
+        numeric_col_idx = self._table_has_numeric_column(table)
+        if numeric_col_idx is None:
+            return None
+        headers = table.get("headers") or []
+        rows = table.get("rows") or []
+        # X-axis = column 0 (labels); Y-axis = first numeric column
+        labels, values = [], []
+        for row in rows[:20]:  # cap at 20 bars for readability
+            if len(row) <= numeric_col_idx: continue
+            label = str(row[0])[:22]
+            try:
+                s = str(row[numeric_col_idx]).strip().replace(",", "").replace("$", "").replace("%", "").replace("₹", "").replace("€", "")
+                values.append(float(s))
+                labels.append(label)
+            except (ValueError, TypeError):
+                continue
+        if len(values) < 2:
+            return None
+        try:
+            fig, ax = plt.subplots(figsize=(10, 5), dpi=120)
+            bars = ax.bar(labels, values, color="#0F62FE", edgecolor="#0043CE", width=0.7)
+            ax.set_ylabel(headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value",
+                          fontsize=10, color="#525252")
+            ax.set_xlabel(headers[0] if headers else "", fontsize=10, color="#525252")
+            chart_title = section_title or (headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Chart")
+            ax.set_title(str(chart_title)[:60], fontsize=12, color="#161616", pad=12)
+            ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+            ax.tick_params(axis="x", labelrotation=35, labelsize=9, colors="#525252")
+            ax.tick_params(axis="y", labelsize=9, colors="#525252")
+            ax.grid(axis="y", alpha=0.25, linestyle="--")
+            # Value labels on bars
+            for bar, v in zip(bars, values):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                        f"{v:,.0f}" if v >= 10 else f"{v:,.2f}",
+                        ha="center", va="bottom", fontsize=8, color="#161616")
+            plt.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+            plt.close(fig)
+            return buf.getvalue()
+        except Exception as e:
+            print(f"[DocGen] chart render failed: {e}")
+            try: plt.close('all')
+            except Exception: pass
+            return None
+
+    def _autoinject_charts(self, sections: list) -> list:
+        """For any section with a numeric table AND no existing image, render a
+        bar chart PNG from the table data and attach as the section's image."""
+        out = []
+        for s in sections:
+            if not isinstance(s, dict):
+                out.append(s); continue
+            ns = dict(s)
+            tbl = ns.get("table")
+            if (tbl and not ns.get("_img_bytes") and not ns.get("image_id") and not ns.get("svg")):
+                png = self._chart_png_from_table(tbl, ns.get("title",""))
+                if png:
+                    ns["_img_bytes"] = png
+                    ns["_img_width"] = 1200
+                    ns["_img_height"] = 600
+                    ns["_img_source"] = "generated:chart"
+                    ns["image_caption"] = ns.get("image_caption") or f"Chart — {ns.get('title','data')}"
+            out.append(ns)
+        return out
 
     def _enforce_content_caps(self, sections: list, fmt: str) -> list:
         """Truncate each section's text/rows so the rendered output respects
