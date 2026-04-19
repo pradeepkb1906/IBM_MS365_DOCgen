@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 19:15 IST (caps 15/15/10+100, Notes source, smart merges notes+attachments+knowledge+MCP)
+# Last synced to OWUI DB: 2026-04-19 20:10 IST (caps 15/15/10+100, Notes + Folder sources, smart merges notes+folder+attachments+knowledge+MCP)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -1147,6 +1147,229 @@ class Tools:
                 })
         return chunks
 
+    async def prepare_content_from_folder(
+        self,
+        query: str,
+        folder_id: str,
+        max_chunks: int = 12,
+        __user__: Optional[dict] = None,
+        __request__=None,
+        __event_emitter__=None,
+    ) -> str:
+        """
+        Source mode: OWUI Folder. Pulls content from everything grouped under
+        an OWUI folder — chats (their assistant + user messages), any notes
+        referenced in folder.items, and any files referenced in folder.items.
+
+        :param query: Topic/question — used to rank excerpts for relevance.
+        :param folder_id: OWUI folder ID (required).
+        :param max_chunks: Max text chunks to return (default 12).
+        """
+        _hb = None
+        try:
+            if not folder_id:
+                return json.dumps({
+                    "error": "folder_id is required.",
+                    "text_chunks": [], "images": [],
+                })
+            await self._emit(__event_emitter__, f"📁 Reading folder {folder_id[:8]}... for: {query[:60]}")
+            _hb = self._start_heartbeat(__event_emitter__,
+                eta_seconds=self._eta_for('prepare_content_from_attachments'),
+                initial_phase='📁 Reading folder')
+            user_id = (__user__ or {}).get("id") or ""
+            text_chunks = self._read_owui_folder(folder_id=folder_id, user_id=user_id)
+            if not text_chunks:
+                await self._stop_heartbeat(_hb)
+                return json.dumps({
+                    "error": f"No content found in folder {folder_id}.",
+                    "hint": "Make sure the folder has chats, notes, or files under it.",
+                    "text_chunks": [], "images": [],
+                })
+            text_chunks = self._rank_text(query, text_chunks)[:max_chunks]
+            await self._emit(__event_emitter__,
+                f"📚 {len(text_chunks)} folder chunks ready", done=True)
+            await self._stop_heartbeat(_hb)
+            return self._package(query, text_chunks, [], source="owui_folder")
+        except Exception:
+            try: await self._stop_heartbeat(_hb)
+            except Exception: pass
+            return json.dumps({"error": traceback.format_exc(),
+                               "text_chunks": [], "images": []})
+
+    def _read_owui_folder(self, folder_id: str = "", user_id: str = "") -> list[dict]:
+        """Pull folder contents from OWUI SQLite. Reads:
+           - all chats with chat.folder_id = folder_id (messages extracted)
+           - any note_ids / file_ids referenced in folder.items or folder.data
+        Returns a flat list of text chunks.
+        """
+        import sqlite3 as _sql, os as _os
+        # Auto-discover OWUI DB (same pattern as _read_owui_notes).
+        db_path = None
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                "lsof -p $(pgrep -f 'open-webui serve'|head -1)|grep webui.db|awk '{print $NF}'|sort -u|head -1",
+                shell=True, timeout=5,
+            ).decode().strip()
+            if out and _os.path.exists(out):
+                db_path = out
+        except Exception:
+            pass
+        if not db_path:
+            db_path = "/Users/pradeepbasavarajappa/.local/share/uv/tools/open-webui/lib/python3.12/site-packages/open_webui/data/webui.db"
+        if not _os.path.exists(db_path):
+            return []
+
+        chunks: list[dict] = []
+        try:
+            con = _sql.connect(db_path, timeout=10)
+            con.execute("PRAGMA busy_timeout=5000")
+
+            # 1) Metadata: folder name + referenced item IDs
+            folder_name = ""
+            ref_note_ids: list[str] = []
+            ref_file_ids: list[str] = []
+            try:
+                if user_id:
+                    row = con.execute(
+                        "SELECT name, items, data FROM folder WHERE id=? AND user_id=?",
+                        (folder_id, user_id),
+                    ).fetchone()
+                else:
+                    row = con.execute(
+                        "SELECT name, items, data FROM folder WHERE id=?",
+                        (folder_id,),
+                    ).fetchone()
+            except Exception:
+                row = None
+            if row:
+                folder_name = row[0] or ""
+                for blob in (row[1], row[2]):
+                    if not blob:
+                        continue
+                    try:
+                        parsed = json.loads(blob) if isinstance(blob, str) else blob
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        for nid in (parsed.get("note_ids") or parsed.get("notes") or []):
+                            if isinstance(nid, str):
+                                ref_note_ids.append(nid)
+                        for fid in (parsed.get("file_ids") or parsed.get("files") or []):
+                            if isinstance(fid, str):
+                                ref_file_ids.append(fid)
+                    elif isinstance(parsed, list):
+                        # items list: [{type:"note"|"file", id:"..."}, ...]
+                        for entry in parsed:
+                            if isinstance(entry, dict):
+                                t = (entry.get("type") or "").lower()
+                                eid = entry.get("id") or ""
+                                if t == "note" and eid:
+                                    ref_note_ids.append(eid)
+                                elif t == "file" and eid:
+                                    ref_file_ids.append(eid)
+
+            # 2) Chats under this folder
+            try:
+                chat_rows = con.execute(
+                    "SELECT id, title, chat FROM chat WHERE folder_id=? ORDER BY updated_at DESC LIMIT 50",
+                    (folder_id,),
+                ).fetchall()
+            except Exception:
+                chat_rows = []
+            for cid, ctitle, cjson in chat_rows:
+                try:
+                    parsed = json.loads(cjson) if isinstance(cjson, str) else (cjson or {})
+                except Exception:
+                    parsed = {}
+                messages = []
+                if isinstance(parsed, dict):
+                    messages = parsed.get("messages") or (parsed.get("history") or {}).get("messages") or []
+                    if isinstance(messages, dict):
+                        messages = list(messages.values())
+                body_parts: list[str] = []
+                for m in messages or []:
+                    if not isinstance(m, dict):
+                        continue
+                    role = m.get("role") or ""
+                    content = m.get("content") or ""
+                    if isinstance(content, list):
+                        # OWUI sometimes stores content as [{type:"text", text:"..."}]
+                        texts = [c.get("text", "") for c in content if isinstance(c, dict)]
+                        content = " ".join(t for t in texts if t)
+                    if isinstance(content, str) and content.strip():
+                        body_parts.append(f"[{role}] {content.strip()}")
+                body = re.sub(r"\s+", " ", " ".join(body_parts)).strip()
+                if not body:
+                    continue
+                for sub in self._chunk_text(body):
+                    chunks.append({
+                        "content": (f"{ctitle}. {sub}" if ctitle else sub),
+                        "source": f"owui-chat:{cid}",
+                        "url": f"#chat/{cid}",
+                        "page": 0, "doc_type": "chat",
+                    })
+
+            # 3) Referenced notes
+            if ref_note_ids:
+                try:
+                    note_chunks = self._read_owui_notes(user_id=user_id, note_ids=ref_note_ids)
+                    chunks.extend(note_chunks)
+                except Exception:
+                    pass
+
+            # 4) Referenced files — read plain text via OWUI's file path column
+            if ref_file_ids:
+                placeholders = ",".join(["?"] * len(ref_file_ids))
+                try:
+                    file_rows = con.execute(
+                        f"SELECT id, filename, path, data FROM file WHERE id IN ({placeholders})",
+                        ref_file_ids,
+                    ).fetchall()
+                except Exception:
+                    file_rows = []
+                for fid, fname, fpath, fdata in file_rows:
+                    body = ""
+                    if fdata:
+                        try:
+                            parsed = json.loads(fdata) if isinstance(fdata, str) else fdata
+                            if isinstance(parsed, dict):
+                                body = parsed.get("content") or parsed.get("text") or ""
+                        except Exception:
+                            pass
+                    if not body and fpath and _os.path.exists(fpath):
+                        try:
+                            # Only read small text-like files directly
+                            if _os.path.getsize(fpath) < 2_000_000:
+                                with open(fpath, "rb") as fh:
+                                    raw = fh.read()
+                                try:
+                                    body = raw.decode("utf-8", errors="ignore")
+                                except Exception:
+                                    body = ""
+                        except Exception:
+                            pass
+                    body = re.sub(r"\s+", " ", str(body)).strip()
+                    if not body:
+                        continue
+                    for sub in self._chunk_text(body):
+                        chunks.append({
+                            "content": (f"{fname}. {sub}" if fname else sub),
+                            "source": f"owui-file:{fid}",
+                            "url": f"#file/{fid}",
+                            "page": 0, "doc_type": "file",
+                        })
+
+            con.close()
+        except Exception as e:
+            print(f"[DocGen] reading OWUI folder failed: {e}")
+
+        # Prefix chunks with folder name for traceability
+        if folder_name and chunks:
+            for c in chunks:
+                c["content"] = f"[Folder: {folder_name}] {c['content']}"
+        return chunks
+
     async def prepare_content_from_attachments(
         self,
         query: str,
@@ -1608,6 +1831,7 @@ class Tools:
         knowledge_collection_id: Optional[str] = None,
         attachment_file_ids: Optional[list[str]] = None,
         note_ids: Optional[list[str]] = None,
+        folder_id: Optional[str] = None,
         use_notes: bool = True,
         use_mcp_auto: bool = True,
         use_web_search: bool = False,
@@ -1632,6 +1856,8 @@ class Tools:
         :param query: User's question / topic.
         :param knowledge_collection_id: Optional OWUI knowledge collection.
         :param attachment_file_ids: Optional chat-attached file IDs.
+        :param note_ids: Optional OWUI note IDs (defaults to all user's notes).
+        :param folder_id: Optional OWUI folder ID (pulls chats + notes + files under it).
         :param use_mcp_auto: If True (default), auto-route to MCP tools.
         :param use_web_search: If True, also run Google search.
         :param max_mcp_tools: Max number of MCP tools to invoke.
@@ -1685,6 +1911,16 @@ class Tools:
                         f"📝 Pulled {len(note_chunks)} note chunks")
                     all_text.extend(note_chunks)
                     source_log.append(f"notes:{len(note_chunks)}")
+
+            # OWUI Folder — pulls chats + notes + files grouped under a folder.
+            if folder_id:
+                user_id = (__user__ or {}).get("id") or ""
+                folder_chunks = self._read_owui_folder(folder_id=folder_id, user_id=user_id)
+                if folder_chunks:
+                    await self._emit(__event_emitter__,
+                        f"📁 Pulled {len(folder_chunks)} folder chunks")
+                    all_text.extend(folder_chunks)
+                    source_log.append(f"folder:{folder_id}:{len(folder_chunks)}")
 
             if use_mcp_auto:
                 servers = self._load_mcp_servers()

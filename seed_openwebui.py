@@ -53,6 +53,24 @@ SPECS = [
         },
     },
     {
+        "name": "prepare_content_from_folder",
+        "description": (
+            "Source mode: OWUI Folder. Pulls content from every chat grouped "
+            "under a folder, plus any notes or files referenced by the folder. "
+            "Chat messages are joined and chunked for ranking. Use this when "
+            "the user asks you to base a doc on a whole folder."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic/question — used to rank folder excerpts."},
+                "folder_id": {"type": "string", "description": "OWUI folder ID (required)."},
+                "max_chunks": {"type": "integer", "description": "Max text chunks (default 12)."},
+            },
+            "required": ["query", "folder_id"],
+        },
+    },
+    {
         "name": "prepare_content_from_attachments",
         "description": (
             "Source mode: Chat Attachments. Extracts text AND images from ALL files attached "
@@ -194,6 +212,16 @@ SPECS = [
                     "items": {"type": "string"},
                     "description": "Optional chat-attached file IDs.",
                 },
+                "note_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional OWUI note IDs. If omitted and use_notes=true, pulls all user notes.",
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Optional OWUI folder ID. When present, pulls chats + notes + files under that folder.",
+                },
+                "use_notes": {"type": "boolean", "description": "Pull OWUI Notes (default true)."},
                 "use_mcp_auto": {"type": "boolean", "description": "Auto-route to MCP tools (default true)."},
                 "use_web_search": {"type": "boolean", "description": "Also run Google search (default false)."},
                 "max_mcp_tools": {"type": "integer", "description": "Max MCP tools to invoke (default 3)."},
@@ -240,27 +268,6 @@ SPECS = [
                 },
             },
             "required": ["session_id", "format", "title", "client_name", "sections_json"],
-        },
-    },
-            "required": ["prompt"],
-        },
-    },
-                "default_kind": {
-                    "type": "string",
-                    "enum": ["auto", "photo", "illustration"],
-                    "description": "Default image kind. 'auto' classifies per-section.",
-                },
-                "max_images": {
-                    "type": "integer",
-                    "description": "Optional hard cap. Omit to use auto-rule ceil(n/5).",
-                },
-            },
-            "required": ["sections_json"],
-        },
-    },
-                "title": {"type": "string", "description": "Short title for the diagram."},
-            },
-            "required": ["html_code"],
         },
     },
 ]
