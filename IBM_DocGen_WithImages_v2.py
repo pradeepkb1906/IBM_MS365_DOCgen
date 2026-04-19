@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-19 20:10 IST (caps 15/15/10+100, Notes + Folder sources, smart merges not..."""
+"""# Last synced to OWUI DB: 2026-04-20 14:45 IST (3-tier KB image fallback: Office extraction -> PDF snapshots -> Wikipedia; compression 5-75x; source attribution)"""
 import re
 import json
 import base64
@@ -650,6 +650,10 @@ class Tools:
             description="JPEG quality (1-95) for compressed KB images. 82 = sweet spot: ~8× smaller than source PNG, no visible banding. Lower = faster iframe render.")
         kb_preview_lazy_hydration: bool = Field(default=True,
             description="Preview iframe: hydrate KB images via JS blob URLs on page-nav instead of inline base64. Saves ~200-600ms on first paint of a 10-page deck.")
+        kb_wikipedia_fallback: bool = Field(default=True,
+            description="When Office attachment extraction + Vision rank finds no image for a section, fetch a representative thumbnail from Wikipedia's REST API (page/summary) using the section title as the query. Keeps the 50/50 layout populated even when the KB image pool is thin.")
+        kb_wikipedia_timeout: int = Field(default=5,
+            description="Per-call timeout (seconds) for the Wikipedia lookup. Keeps the enrichment loop bounded when the Wikipedia edge is slow or the topic has no article.")
     def __init__(self):
         self.valves = self.Valves()
         self._logo_png_cache: Optional[bytes] = None
@@ -2841,6 +2845,121 @@ class Tools:
                 pg = kb.get("page")
                 pieces.append(f"{fn}" + (f" p.{pg}" if pg else ""))
         return ("Source: " + "; ".join(pieces)) if pieces else ""
+    def _pdf_pages_as_images(self, pdf_bytes, max_pages=20, scale=1.5):
+        """Render each PDF page as a PIL-backed PNG. Tries (a) pypdfium2
+        (self-contained wheel, no system libs), (b) PyMuPDF/fitz. Returns
+        a list of {id, bytes, source_file, page, caption_seed} — same
+        shape as _extract_office_images so the match pipeline is uniform.
+        Returns [] if neither library is present."""
+        try:
+            import pypdfium2 as pdfium
+        except Exception:
+            try:
+                import fitz
+                return self._pdf_pages_via_fitz(pdf_bytes, max_pages, scale)
+            except Exception:
+                return []
+        out = []
+        try:
+            pdf = pdfium.PdfDocument(pdf_bytes)
+            n = min(len(pdf), max_pages)
+            for i in range(n):
+                try:
+                    page = pdf[i]
+                    pil = page.render(scale=scale).to_pil()
+                    buf = io.BytesIO()
+                    pil.convert("RGB").save(buf, format="PNG", optimize=True)
+                    # Best-effort text snippet for BM25
+                    try:
+                        tp = page.get_textpage()
+                        text = (tp.get_text_bounded() or "")[:800]
+                    except Exception:
+                        text = ""
+                    out.append({"id": f"pdfpage:{i+1}", "bytes": buf.getvalue(),
+                                "source_file": "", "page": i+1,
+                                "caption_seed": text or f"page {i+1}"})
+                except Exception as e:
+                    print(f"[DocGen] pdfium page {i} render failed: {e}")
+        except Exception as e:
+            print(f"[DocGen] pdfium open failed: {e}")
+        return out
+    def _pdf_pages_via_fitz(self, pdf_bytes, max_pages=20, scale=1.5):
+        import fitz
+        out = []
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for i in range(min(len(doc), max_pages)):
+                page = doc[i]
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+                png = pix.tobytes("png")
+                text = page.get_text()[:800] if hasattr(page, "get_text") else ""
+                out.append({"id": f"pdfpage:{i+1}", "bytes": png,
+                            "source_file": "", "page": i+1,
+                            "caption_seed": text or f"page {i+1}"})
+        except Exception as e:
+            print(f"[DocGen] fitz render failed: {e}")
+        return out
+    def _wikipedia_image_for(self, title):
+        """Fetch a representative thumbnail from Wikipedia's REST API for the
+        section title. Returns (img_bytes, page_url) or (None, None).
+        Two-tier lookup: (a) direct /page/summary/{title} for clean titles,
+        (b) /search/title?q=... fallback for aliases like 'watsonx' or 'AIOps'.
+        Skips SVG sources (we have no rasterizer). Zero deps beyond requests."""
+        if not title: return None, None
+        from urllib.parse import quote
+        import re as _re
+        variants = [title.strip()]
+        stripped = _re.sub(r"\b(strategy|overview|roadmap|platform|adoption|trends|mix|"
+                           r"split|by\s+\w+|2020|2021|2022|2023|2024|2025|2026|FY\d+)\b",
+                           "", title, flags=_re.I).strip()
+        if stripped and stripped != variants[0]: variants.append(stripped)
+        toks = _re.findall(r"\w+", title)
+        if len(toks) >= 2:
+            short = " ".join(toks[:2])
+            if short not in variants: variants.append(short)
+        ua = {"User-Agent": "IBM-DocGen/1.0 (internal use; contact: ibm-docgen@local)"}
+        to = max(2, int(self.valves.kb_wikipedia_timeout))
+        def _dl(thumb):
+            if not thumb or thumb.lower().endswith(".svg"): return None
+            try:
+                r = requests.get(thumb, headers=ua, timeout=to)
+                if r.status_code == 200 and len(r.content) > 2000: return r.content
+            except Exception: pass
+            return None
+        def _summary(q):
+            try:
+                r = requests.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(q)}",
+                                 headers=ua, timeout=to)
+                if r.status_code != 200: return None
+                d = r.json()
+                thumb = ((d.get("thumbnail") or {}).get("source")
+                         or (d.get("originalimage") or {}).get("source"))
+                page = ((d.get("content_urls") or {}).get("desktop") or {}).get("page")
+                return thumb, page, d.get("title")
+            except Exception: return None
+        # Tier (a): direct summary
+        for q in variants:
+            hit = _summary(q)
+            if not hit: continue
+            thumb, page_url, _ = hit
+            img = _dl(thumb)
+            if img: return img, page_url or f"https://en.wikipedia.org/wiki/{quote(q)}"
+        # Tier (b): search endpoint — pick best-match title, then summary
+        try:
+            r = requests.get("https://en.wikipedia.org/w/rest.php/v1/search/title",
+                             params={"q": variants[0], "limit": 3}, headers=ua, timeout=to)
+            if r.status_code == 200:
+                for page in (r.json().get("pages") or []):
+                    key = page.get("key") or page.get("title")
+                    if not key: continue
+                    hit = _summary(key)
+                    if not hit: continue
+                    thumb, page_url, _ = hit
+                    img = _dl(thumb)
+                    if img: return img, page_url or f"https://en.wikipedia.org/wiki/{quote(key)}"
+        except Exception as e:
+            print(f"[DocGen] wikipedia search failed: {e}")
+        return None, None
     def _compress_kb_image(self, raw_bytes):
         """Resize to max_dim longest-edge + re-encode as progressive JPEG.
         Typical PNG → JPEG saves 5-10×; KB-image data URI for an iframe
@@ -2884,33 +3003,60 @@ class Tools:
                 print(f"[DocGen] fetch attachment {fid} failed: {e}")
         return out
     def _extract_office_images(self, office_attachments):
-        """Zipfile-extract images + surrounding text context from DOCX/PPTX/XLSX."""
+        """Zipfile-extract images + surrounding text context from DOCX/PPTX/XLSX.
+        For PPTX: builds per-slide context by reading each slide XML + slide rels,
+        so each image gets its own slide's text as caption_seed (not one big blob).
+        For DOCX/XLSX: fall back to full-document text context."""
         out = []
         strip_tags = lambda s: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
-        media_prefix = lambda ext: {".docx": "word/media/", ".pptx": "ppt/media/",
-                                     ".xlsx": "xl/media/"}.get(ext, "")
         img_ok = lambda n: any(n.lower().endswith(e) for e in (".png", ".jpg", ".jpeg", ".gif", ".webp"))
+        img_scan_prefix = {".docx": ("word/media/", "word/embeddings/"),
+                           ".pptx": ("ppt/media/", "ppt/embeddings/"),
+                           ".xlsx": ("xl/media/", "xl/embeddings/")}
         for fname, ext, data in office_attachments:
             try:
                 zf = zipfile.ZipFile(io.BytesIO(data))
-                parts = []
-                for n in zf.namelist():
+                names = zf.namelist()
+                # Fallback full-doc context (used for DOCX/XLSX and as backstop)
+                full_ctx_parts = []
+                for n in names:
                     if not n.endswith(".xml"): continue
                     if not any(n.startswith(p) for p in ("word/document", "ppt/slides/", "xl/worksheets/")):
                         continue
                     try:
-                        cleaned = strip_tags(zf.read(n).decode("utf-8", errors="ignore"))
-                        if cleaned: parts.append(cleaned)
+                        c = strip_tags(zf.read(n).decode("utf-8", errors="ignore"))
+                        if c: full_ctx_parts.append(c)
                     except Exception: pass
-                ctx = (" ".join(parts))[:12000] or fname
-                prefix = media_prefix(ext)
-                if not prefix: continue
-                for n in zf.namelist():
-                    if not n.startswith(prefix) or not img_ok(n): continue
+                full_ctx = (" ".join(full_ctx_parts))[:12000] or fname
+                # PPTX: map each image in ppt/media/ to the slide(s) that reference it
+                img_to_slide_ctx = {}  # media_basename -> "slide N text"
+                if ext == ".pptx":
+                    for slide_n in [n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)]:
+                        try:
+                            sxml = zf.read(slide_n).decode("utf-8", errors="ignore")
+                            stext = strip_tags(sxml)[:2000]
+                        except Exception: stext = ""
+                        rels_n = slide_n.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels"
+                        if rels_n in names:
+                            try:
+                                rxml = zf.read(rels_n).decode("utf-8", errors="ignore")
+                                for rel_tgt in re.findall(r'Target="([^"]+)"', rxml):
+                                    if "/media/" in rel_tgt or rel_tgt.startswith("../media/"):
+                                        base = rel_tgt.split("/")[-1]
+                                        cur = img_to_slide_ctx.get(base, "")
+                                        img_to_slide_ctx[base] = (cur + " " + stext).strip()[:2500]
+                            except Exception: pass
+                prefixes = img_scan_prefix.get(ext, ())
+                for n in names:
+                    if not any(n.startswith(p) for p in prefixes): continue
+                    if not img_ok(n): continue
                     b = zf.read(n)
-                    if len(b) < 2000: continue
-                    out.append({"id": f"{fname}:{n.split('/')[-1]}", "bytes": b,
-                                "source_file": fname, "page": 0, "caption_seed": ctx})
+                    if len(b) < 1200: continue  # skip tiny icons
+                    base = n.split("/")[-1]
+                    ctx = img_to_slide_ctx.get(base, "") or full_ctx
+                    out.append({"id": f"{fname}:{base}", "bytes": b,
+                                "source_file": fname, "page": 0,
+                                "caption_seed": ctx})
             except Exception as e:
                 print(f"[DocGen] office extract {fname} failed: {e}")
         return out
@@ -3022,6 +3168,17 @@ class Tools:
         pdfs = [a for a in attachments if a[1] == ".pdf"]
         office = [a for a in attachments if a[1] in (".docx", ".pptx", ".xlsx")]
         office_images = await asyncio.to_thread(self._extract_office_images, office) if office else []
+        # Also render each PDF page as an image snapshot (pypdfium2 / fitz — auto-skipped on Beta if missing)
+        for fname, _e, data in pdfs:
+            pages = await asyncio.to_thread(self._pdf_pages_as_images, data, 20, 1.5)
+            for p in pages:
+                p["source_file"] = fname
+                p["id"] = f"{fname}:page{p['page']}"
+            office_images.extend(pages)
+        if pdfs and office_images and any(p.get("page") for p in office_images):
+            try: await self._emit(__event_emitter__,
+                f"📸 Rendered {sum(1 for p in office_images if p.get('page'))} PDF page snapshot(s)")
+            except Exception: pass
         # Probe Plan B once
         plan_b_ok = False
         if pdfs and self.valves.kb_plan_b_enabled:
@@ -3033,6 +3190,7 @@ class Tools:
             except Exception: pass
         thr = int(self.valves.kb_vision_score_threshold)
         async def match_one(s):
+            # Tier 1: Plan C (Office attachment images + Claude Vision rank)
             try:
                 if plan_b_ok:
                     m = await asyncio.to_thread(self._plan_b_match, s, pdfs, auth)
@@ -3042,16 +3200,34 @@ class Tools:
                     m = await asyncio.to_thread(self._plan_c_match, s, top, auth)
                     if m and m["score"] >= thr: return m
             except Exception as e:
-                print(f"[DocGen] KB match error: {e}")
+                print(f"[DocGen] KB tier-1 match error: {e}")
+            # Tier 2: Wikipedia REST fallback (only when no good KB match)
+            if self.valves.kb_wikipedia_fallback:
+                try:
+                    wiki_bytes, wiki_url = await asyncio.to_thread(
+                        self._wikipedia_image_for, s.get("title", ""))
+                    if wiki_bytes:
+                        compressed, ext = self._compress_kb_image(wiki_bytes)
+                        return {"image_bytes": compressed, "image_ext": ext,
+                                "source_file": wiki_url or "wikipedia.org",
+                                "score": 75,
+                                "caption": f"Wikipedia: {s.get('title', '')[:60]}",
+                                "type": "wikipedia"}
+                except Exception as e:
+                    print(f"[DocGen] KB tier-2 (wikipedia) error: {e}")
             return None
         results = await asyncio.gather(*[match_one(s) for s in sections], return_exceptions=True)
+        kb_count = wiki_count = 0
         for s, m in zip(sections, results):
             if isinstance(m, dict) and m.get("image_bytes"):
                 s["_kb_match"] = m
-        accepted = sum(1 for s in sections if s.get("_kb_match"))
+                if m.get("type") == "wikipedia": wiki_count += 1
+                else: kb_count += 1
+        total = kb_count + wiki_count
         try: await self._emit(__event_emitter__,
-            f"👁️ KB 50/50 layout applied to {accepted}/{len(sections)} sections with ≥{thr}/100 image match "
-            f"(others render as full-width text)")
+            f"👁️ 50/50 layout: {total}/{len(sections)} sections — "
+            f"{kb_count} from attachment, {wiki_count} from Wikipedia "
+            f"(others stay full-width text)")
         except Exception: pass
         return sections
     def _rank_images(self, query, images):
