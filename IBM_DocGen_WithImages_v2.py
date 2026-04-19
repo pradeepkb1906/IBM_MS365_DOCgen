@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 18:45 IST (DOCX preview footer: IBM logo left + Page N of M right, visible in iframe)
+# Last synced to OWUI DB: 2026-04-19 18:55 IST (logo 0.5cm + 'IBM Consulting 2026' brand label on PPTX + DOCX)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -4726,8 +4726,8 @@ class Tools:
             lw, lh = self._get_ibm_logo_dims()
             # 1/5 of the previous 0.5-inch tall → ~0.1 inch tall, width by aspect.
             # Requested: smaller, left-aligned IBM mark on every page.
-            # 1cm x 1cm per user policy (1 cm = 360,000 EMU)
-            footer_h_emu = 360000  # 1 cm
+            # 0.5cm x 0.5cm per user policy v7 (reduced 50% from 1cm)
+            footer_h_emu = 180000  # 0.5 cm
             footer_w_emu = int(footer_h_emu * (lw / max(lh, 1)))
             rel_entries.append(
                 '<Relationship Id="rIdFooter" '
@@ -4771,6 +4771,10 @@ class Tools:
                 f'<a:ext cx="{footer_w_emu}" cy="{footer_h_emu}"/></a:xfrm>'
                 '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
                 '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+                # Inline "| IBM Consulting 2026" text after the logo
+                '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
+                '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
+                '<w:t xml:space="preserve">  |  IBM Consulting 2026</w:t></w:r>'
                 # Tab, then page number
                 '<w:r><w:tab/></w:r>'
                 '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
@@ -4870,17 +4874,19 @@ class Tools:
         logo_img_tag = ""
         if logo_png:
             logo_b64 = base64.b64encode(logo_png).decode()
-            logo_img_tag = f'<img src="data:image/png;base64,{logo_b64}" style="height:28px;width:auto" alt="IBM"/>'
+            # 14px ≈ 0.5 cm at normal screen density (was 28px / 1 cm)
+            logo_img_tag = f'<img src="data:image/png;base64,{logo_b64}" style="height:14px;width:auto;vertical-align:middle" alt="IBM"/>'
 
         def footer_html(page_num: int, total_pages: int) -> str:
-            """Reusable page footer — IBM logo left, Page N of M right."""
+            """Reusable page footer — IBM logo + '| IBM Consulting 2026' left, Page N of M right."""
             return (
                 '<div style="position:absolute;bottom:24px;left:60px;right:60px;'
                 'display:flex;align-items:center;justify-content:space-between;'
                 'padding-top:12px;border-top:1px solid #E0E0E0;'
                 'font-family:\\"IBM Plex Sans\\",Calibri,sans-serif;'
                 'font-size:10px;color:#525252">'
-                f'<div>{logo_img_tag}</div>'
+                f'<div style="display:flex;align-items:center;gap:8px">{logo_img_tag}'
+                '<span>|&nbsp;&nbsp;IBM Consulting 2026</span></div>'
                 f'<div>Page {page_num} of {total_pages}</div>'
                 '</div>'
             )
@@ -5783,10 +5789,9 @@ function showTab(i){{
             logo_fname = "ibm_logo_black.png"
             media_files.append((logo_fname, logo_png))
             lw, lh = self._get_ibm_logo_dims()
-            # 1/5 of previous 0.5-inch tall, placed at bottom-LEFT per request.
-            # 1cm x 1cm per user policy (1 cm = 360,000 EMU since 914400 EMU/inch and 2.54 cm/inch)
-            logo_h_emu = 360000  # 1 cm
-            logo_w_emu = int(logo_h_emu * (lw / max(lh, 1)))  # keep aspect ratio, so width ~ 1cm if logo is square-ish
+            # 0.5cm x 0.5cm per user policy v7 (reduced 50% from 1cm)
+            logo_h_emu = 180000  # 0.5 cm
+            logo_w_emu = int(logo_h_emu * (lw / max(lh, 1)))
             logo_x_emu = 228600  # 0.25in left margin
             logo_y_emu = SLIDE_H_EMU - logo_h_emu - 114300  # 0.125in bottom margin
 
@@ -5913,6 +5918,16 @@ function showTab(i){{
             logo_xml = logo_shape_and_rel(slide_rel_entries)
             if logo_xml:
                 shapes.append(logo_xml)
+            # Brand label " | IBM Consulting 2026" — placed right after the logo.
+            if logo_fname:
+                label_x = logo_x_emu + logo_w_emu + 50800   # ~0.055in gap after logo
+                label_y = logo_y_emu - 15000                # tiny visual tweak to align with logo mid-line
+                label_w = 2400000                           # 2.6 inches wide is plenty
+                label_h = logo_h_emu + 30000
+                shapes.append(txt_box(
+                    label_x, label_y, label_w, label_h,
+                    "|  IBM Consulting 2026", size=900, color="525252", align="l",
+                ))
             # Page number — bottom-right corner of every slide.
             page_num_text = f"{slide_num} / {len(sections) + 1}"
             page_num_x = SLIDE_W_EMU - 914400 - 228600   # 1" wide, 0.25" right margin
