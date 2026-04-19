@@ -3471,24 +3471,26 @@ class Tools:
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:
-.dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:
-.tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
-.b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
-font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
-.bw{{background:
-.sn{{color:
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#F0F2F5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
+.dk{{border:3px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#FFFFFF;display:flex;flex-direction:column;box-shadow:0 4px 16px rgba(15,98,254,0.15)}}
+.tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_60};flex-wrap:wrap;flex-shrink:0}}
+.b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:{IBM_BLUE_60};color:#FFFFFF;border:1px solid #FFFFFF}}
+.b:hover{{background:{IBM_BLUE_70};color:#FFFFFF}}
+.sn{{color:#FFFFFF;font-size:12px;min-width:90px;text-align:center;font-weight:600}}
 .sp{{flex:1}}
 .sw{{background:{IBM_GRAY_10};padding:20px;overflow:auto;flex:1;min-height:0}}
-.pg{{max-width:8.5in;margin:0 auto 16px;box-shadow:0 2px 8px rgba(0,0,0,0.1);min-height:9in}}
+.pg{{max-width:8.5in;margin:0 auto 16px;box-shadow:0 2px 8px rgba(0,0,0,0.1);min-height:9in;background:#FFFFFF;transform-origin:top center;transition:transform .15s ease}}
 </style></head><body>
 <div class="dk">
   <div class="tb">
-    <button class="b bw" onclick="nav(-1)">← Prev</button>
+    <button class="b" onclick="nav(-1)">← Prev</button>
     <span class="sn" id="sn">Page 1 / {total}</span>
-    <button class="b bw" onclick="nav(1)">Next →</button>
+    <button class="b" onclick="nav(1)">Next →</button>
+    <button class="b" onclick="zoomStep(-0.1)" title="Zoom out">🔍−</button>
+    <button class="b" onclick="zoomReset()" title="Reset zoom"><span id="zl">100%</span></button>
+    <button class="b" onclick="zoomStep(0.1)" title="Zoom in">🔍+</button>
     <span class="sp"></span>
-    <a class="b bw" href="{data_uri}" download="{safe_name}.docx">⬇ Download DOCX</a>
+    <a class="b" href="{data_uri}" download="{safe_name}.docx">⬇ Download DOCX</a>
   </div>
   <div class="sw">{"".join(page_parts)}</div>
 </div>
@@ -3510,12 +3512,18 @@ font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration
   window.addEventListener('load',fit);
   new MutationObserver(fit).observe(document.documentElement,{{attributes:true,childList:true,subtree:false}});
 }})();
-var cur=0,sl=document.querySelectorAll(".pg"),tot=sl.length;
+var cur=0,sl=document.querySelectorAll(".pg"),tot=sl.length,zm=1;
+function applyZoom(){{sl.forEach(function(p){{p.style.transform='scale('+zm+')'}});var el=document.getElementById('zl');if(el)el.textContent=Math.round(zm*100)+'%'}}
+function zoomStep(d){{zm=Math.max(0.5,Math.min(2,zm+d));applyZoom()}}
+function zoomReset(){{zm=1;applyZoom()}}
 function nav(d){{sl[cur].style.display="none";cur=Math.max(0,Math.min(tot-1,cur+d));
 sl[cur].style.display="block";document.getElementById("sn").textContent="Page "+(cur+1)+" / "+tot;
 var sw=document.querySelector(".sw");if(sw)sw.scrollTop=0}}
 document.addEventListener("keydown",function(e){{
-if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
+if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1);
+if((e.ctrlKey||e.metaKey)&&e.key==="=")e.preventDefault()||zoomStep(0.1);
+if((e.ctrlKey||e.metaKey)&&e.key==="-")e.preventDefault()||zoomStep(-0.1);
+if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
 </script></body></html>"""
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"})
     def _build_and_render_xlsx(self, session_id, title, client_name, sections, workbook_spec, emitter):
@@ -4271,26 +4279,27 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:
-.wk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:
-.tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
-.b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
-font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#F0F2F5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
+.wk{{border:3px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#FFFFFF;display:flex;flex-direction:column;box-shadow:0 4px 16px rgba(15,98,254,0.15)}}
+.tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_60};flex-wrap:wrap;flex-shrink:0}}
+.b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:{IBM_BLUE_60};color:#FFFFFF;border:1px solid #FFFFFF}}
+.b:hover{{background:{IBM_BLUE_70};color:#FFFFFF}}
 .sp{{flex:1}}
-.title{{color:
+.title{{color:#FFFFFF;font-size:13px;font-weight:600}}
 .tabs{{display:flex;gap:2px;padding:8px 14px 0;background:{IBM_GRAY_10};flex-wrap:wrap;border-bottom:1px solid {IBM_GRAY_20};flex-shrink:0}}
-.tab{{border:1px solid {IBM_GRAY_20};border-bottom:none;border-radius:6px 6px 0 0;padding:8px 14px;
-font-size:12px;cursor:pointer;font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;
-background:
-.tab.active{{background:{IBM_BLUE_60};color:
+.tab{{border:1px solid {IBM_GRAY_20};border-bottom:none;border-radius:6px 6px 0 0;padding:8px 14px;font-size:12px;cursor:pointer;font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;background:#FFFFFF;color:{IBM_GRAY_70}}}
+.tab.active{{background:{IBM_BLUE_60};color:#FFFFFF;border-color:{IBM_BLUE_60}}}
 .sw{{background:{IBM_GRAY_10};padding:20px;overflow:auto;flex:1;min-height:0}}
-.panel{{background:
+.panel{{background:#FFFFFF;padding:24px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,0.08);transform-origin:top center;transition:transform .15s ease}}
 </style></head><body>
 <div class="wk">
   <div class="tb">
     <span class="title">📊 {self._html_esc(title)}</span>
     <span class="sp"></span>
     <span class="title">{total} sheet{"s" if total != 1 else ""}</span>
+    <button class="b" onclick="zoomStep(-0.1)" title="Zoom out">🔍−</button>
+    <button class="b" onclick="zoomReset()" title="Reset zoom"><span id="zl">100%</span></button>
+    <button class="b" onclick="zoomStep(0.1)" title="Zoom in">🔍+</button>
     <a class="b" href="{data_uri}" download="{safe_name}.xlsx">⬇ Download XLSX</a>
   </div>
   <div class="tabs">{"".join(tab_buttons)}</div>
@@ -4314,6 +4323,10 @@ background:
   window.addEventListener('load',fit);
   new MutationObserver(fit).observe(document.documentElement,{{attributes:true,childList:true,subtree:false}});
 }})();
+var zm=1;
+function applyZoom(){{document.querySelectorAll(".panel").forEach(function(p){{p.style.transform='scale('+zm+')'}});var el=document.getElementById('zl');if(el)el.textContent=Math.round(zm*100)+'%'}}
+function zoomStep(d){{zm=Math.max(0.5,Math.min(2,zm+d));applyZoom()}}
+function zoomReset(){{zm=1;applyZoom()}}
 function showTab(i){{
   document.querySelectorAll(".tab").forEach(function(t){{
     t.classList.toggle("active", parseInt(t.dataset.i,10)===i);
@@ -4322,6 +4335,10 @@ function showTab(i){{
     p.style.display = (parseInt(p.dataset.i,10)===i) ? "block" : "none";
   }});
 }}
+document.addEventListener("keydown",function(e){{
+if((e.ctrlKey||e.metaKey)&&e.key==="=")e.preventDefault()||zoomStep(0.1);
+if((e.ctrlKey||e.metaKey)&&e.key==="-")e.preventDefault()||zoomStep(-0.1);
+if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
 </script></body></html>"""
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"})
     def _build_and_render_pptx(self, session_id, title, client_name, sections, emitter):
@@ -4820,24 +4837,26 @@ function showTab(i){{
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:
-.dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:
-.tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
-.b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
-font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
-.bw{{background:
-.sn{{color:
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#F0F2F5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
+.dk{{border:3px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#FFFFFF;display:flex;flex-direction:column;box-shadow:0 4px 16px rgba(15,98,254,0.15)}}
+.tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_60};flex-wrap:wrap;flex-shrink:0}}
+.b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:{IBM_BLUE_60};color:#FFFFFF;border:1px solid #FFFFFF}}
+.b:hover{{background:{IBM_BLUE_70};color:#FFFFFF}}
+.sn{{color:#FFFFFF;font-size:12px;min-width:90px;text-align:center;font-weight:600}}
 .sp{{flex:1}}
 .sw{{background:{IBM_GRAY_10};padding:20px;overflow:auto;flex:1;min-height:0}}
-.sl{{max-width:100%;width:100%;margin:0 auto 16px;box-shadow:0 2px 8px rgba(0,0,0,0.12);border-radius:4px;overflow:hidden}}
+.sl{{max-width:100%;width:100%;margin:0 auto 16px;box-shadow:0 2px 8px rgba(0,0,0,0.12);border-radius:4px;overflow:hidden;transform-origin:top center;transition:transform .15s ease}}
 </style></head><body>
 <div class="dk">
   <div class="tb">
-    <button class="b bw" onclick="nav(-1)">← Prev</button>
+    <button class="b" onclick="nav(-1)">← Prev</button>
     <span class="sn" id="sn">Slide 1 / {total}</span>
-    <button class="b bw" onclick="nav(1)">Next →</button>
+    <button class="b" onclick="nav(1)">Next →</button>
+    <button class="b" onclick="zoomStep(-0.1)" title="Zoom out">🔍−</button>
+    <button class="b" onclick="zoomReset()" title="Reset zoom"><span id="zl">100%</span></button>
+    <button class="b" onclick="zoomStep(0.1)" title="Zoom in">🔍+</button>
     <span class="sp"></span>
-    <a class="b bw" href="{data_uri}" download="{safe_name}.pptx">⬇ Download PPTX</a>
+    <a class="b" href="{data_uri}" download="{safe_name}.pptx">⬇ Download PPTX</a>
   </div>
   <div class="sw">{"".join(slide_parts)}</div>
 </div>
@@ -4859,12 +4878,18 @@ font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration
   window.addEventListener('load',fit);
   new MutationObserver(fit).observe(document.documentElement,{{attributes:true,childList:true,subtree:false}});
 }})();
-var cur=0,sl=document.querySelectorAll(".sl"),tot=sl.length;
+var cur=0,sl=document.querySelectorAll(".sl"),tot=sl.length,zm=1;
+function applyZoom(){{sl.forEach(function(p){{p.style.transform='scale('+zm+')'}});var el=document.getElementById('zl');if(el)el.textContent=Math.round(zm*100)+'%'}}
+function zoomStep(d){{zm=Math.max(0.5,Math.min(2,zm+d));applyZoom()}}
+function zoomReset(){{zm=1;applyZoom()}}
 function nav(d){{sl[cur].style.display="none";cur=Math.max(0,Math.min(tot-1,cur+d));
 sl[cur].style.display="block";document.getElementById("sn").textContent="Slide "+(cur+1)+" / "+tot;
 var sw=document.querySelector(".sw");if(sw)sw.scrollTop=0}}
 document.addEventListener("keydown",function(e){{
-if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
+if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1);
+if((e.ctrlKey||e.metaKey)&&e.key==="=")e.preventDefault()||zoomStep(0.1);
+if((e.ctrlKey||e.metaKey)&&e.key==="-")e.preventDefault()||zoomStep(-0.1);
+if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
 </script></body></html>"""
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"})
     def _ext(self, name: str) -> str:
