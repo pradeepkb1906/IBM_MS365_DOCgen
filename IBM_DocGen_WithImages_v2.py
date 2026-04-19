@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 17:20 IST (caps 80/300/50, disable_enrichment default True, auto-chart from tables)
+# Last synced to OWUI DB: 2026-04-19 17:30 IST (caps 100/500, IBM Plex Sans, pie/bar/line auto-routed charts)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -193,7 +193,7 @@ SVG_CLASSES_CSS = """
 SVG_BASE_STYLES = """
 * { box-sizing: border-box; margin: 0; font-family: var(--font-sans); }
 html, body { overflow: hidden; }
-body { background: var(--color-bg-primary); color: var(--color-text-primary); line-height: 1.5; padding: 8px; }
+body { background: var(--color-bg-primary); color: var(--color-text-primary); line-height: 1.7; padding: 8px; }
 svg { overflow: visible; }
 svg text { fill: var(--color-text-primary); }
 h1 { font-size: 22px; font-weight: 500; margin-bottom: 12px; }
@@ -4585,7 +4585,7 @@ class Tools:
         def run_xml(text, size=22, bold=False, italic=False, color="161616"):
             return (
                 f'<w:r><w:rPr>'
-                f'<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>'
+                f'<w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
                 f'<w:sz w:val="{size}"/>'
                 f'<w:color w:val="{color}"/>'
                 f'{"<w:b/>" if bold else ""}'
@@ -4597,7 +4597,7 @@ class Tools:
             return (
                 f'<w:p><w:pPr>'
                 f'<w:jc w:val="{align}"/>'
-                f'<w:spacing w:after="{after}" w:before="{before}" w:line="300" w:lineRule="auto"/>'
+                f'<w:spacing w:after="{after}" w:before="{before}" w:line="360" w:lineRule="auto"/>'
                 f'</w:pPr>{runs}</w:p>'
             )
 
@@ -4864,24 +4864,24 @@ class Tools:
             parts = []
             parts.append(
                 f'<h1 style="font-size:28px;color:{IBM_BLUE_60};font-weight:700;margin:0 0 16px;'
-                f'font-family:Calibri,sans-serif">{self._html_esc(section.get("title", ""))}</h1>'
+                f'font-family:\"IBM Plex Sans\",Calibri,sans-serif">{self._html_esc(section.get("title", ""))}</h1>'
             )
             for para in section.get("paragraphs", []) or []:
                 parts.append(
-                    f'<p style="font-size:12px;color:{IBM_GRAY_100};line-height:1.5;margin:8px 0;'
-                    f'font-family:Calibri,sans-serif">{self._html_esc(para)}</p>'
+                    f'<p style="font-size:12px;color:{IBM_GRAY_100};line-height:1.7;margin:8px 0;'
+                    f'font-family:\"IBM Plex Sans\",Calibri,sans-serif">{self._html_esc(para)}</p>'
                 )
             bullets = section.get("bullets", []) or []
             if bullets:
                 lis = "".join(
-                    f'<li style="font-size:12px;color:{IBM_GRAY_100};margin:4px 0;font-family:Calibri,sans-serif">{self._html_esc(b)}</li>'
+                    f'<li style="font-size:12px;color:{IBM_GRAY_100};margin:4px 0;font-family:\"IBM Plex Sans\",Calibri,sans-serif">{self._html_esc(b)}</li>'
                     for b in bullets
                 )
                 parts.append(f'<ul style="padding-left:24px;margin:8px 0">{lis}</ul>')
             if section.get("table"):
                 t = section["table"]
                 tbl = (
-                    f'<table style="width:100%;border-collapse:collapse;margin:12px 0;font-size:11px;font-family:Calibri,sans-serif">'
+                    f'<table style="width:100%;border-collapse:collapse;margin:12px 0;font-size:11px;font-family:\"IBM Plex Sans\",Calibri,sans-serif">'
                 )
                 if t.get("headers"):
                     tbl += f'<tr style="background:{IBM_BLUE_60}">'
@@ -4919,15 +4919,15 @@ class Tools:
             )
 
         total = len(page_parts)
-        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
 .dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#fff;display:flex;flex-direction:column}}
 .tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
 .b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
-font-family:Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
+font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
 .bw{{background:#fff;color:{IBM_BLUE_70}}} .bg{{background:rgba(255,255,255,0.2);color:#fff}}
 .sn{{color:#fff;font-size:12px;min-width:90px;text-align:center}}
 .sp{{flex:1}}
@@ -5081,7 +5081,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         RAG_MAP = {"RED": "DA1E28", "AMBER": "F1C21B", "GREEN": "24A148",
                    "RAG:RED": "DA1E28", "RAG:AMBER": "F1C21B", "RAG:GREEN": "24A148"}
 
-        note_font = Font(name="Calibri", size=10, italic=True, color="525252")
+        note_font = Font(name="IBM Plex Sans", size=10, italic=True, color="525252")
         thin = Side(border_style="thin", color="CCCCCC")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
         wrap = Alignment(wrap_text=True, vertical="top")
@@ -5101,14 +5101,14 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             alt_bg = (styles.get("alt_row_bg") or "#F4F4F4").lstrip("#")
 
             hdr_fill = PatternFill(start_color=hdr_bg, end_color=hdr_bg, fill_type="solid")
-            hdr_font = Font(name="Calibri", size=11, bold=True, color=hdr_fg)
-            body_font = Font(name="Calibri", size=11, color="161616")
+            hdr_font = Font(name="IBM Plex Sans", size=11, bold=True, color=hdr_fg)
+            body_font = Font(name="IBM Plex Sans", size=11, color="161616")
             alt_fill = PatternFill(start_color=alt_bg, end_color=alt_bg, fill_type="solid")
 
             row_cursor = 1
             # Title row (merged)
             ws.cell(row=row_cursor, column=1, value=str(sh["title"]))
-            ws.cell(row=row_cursor, column=1).font = Font(name="Calibri", size=16, bold=True, color="0F62FE")
+            ws.cell(row=row_cursor, column=1).font = Font(name="IBM Plex Sans", size=16, bold=True, color="0F62FE")
             if col_count > 1:
                 ws.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=col_count)
             ws.row_dimensions[row_cursor].height = 26
@@ -5157,7 +5157,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                     elif rag_key:
                         c.value = cell_str.strip()
                         c.fill = PatternFill(start_color=RAG_MAP[rag_key], end_color=RAG_MAP[rag_key], fill_type="solid")
-                        c.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+                        c.font = Font(name="IBM Plex Sans", size=11, bold=True, color="FFFFFF")
                         c.alignment = Alignment(horizontal="center", vertical="center")
                     else:
                         # Auto-coerce pure numeric strings
@@ -5224,12 +5224,12 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 
         return self._render_xlsx_preview(title, client_name, sheets, data_uri)
 
-    # Hard content caps (2026-04-19 user policy):
-    #   PPTX = 80 words per slide   (title + paragraphs + bullets combined)
-    #   DOCX = 300 words per page   (paragraphs + bullets combined)
+    # Hard content caps (2026-04-19 user policy v3):
+    #   PPTX = 100 words per slide  (title + paragraphs + bullets combined)
+    #   DOCX = 500 words per page   (paragraphs + bullets combined)
     #   XLSX = 50 rows per sheet    (data rows, header excluded)
-    MAX_WORDS_PPTX = 80
-    MAX_WORDS_DOCX = 300
+    MAX_WORDS_PPTX = 100
+    MAX_WORDS_DOCX = 500
     MAX_ROWS_XLSX = 50
 
     # ──────────────────────────────────────────────────────────────────────
@@ -5261,8 +5261,18 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 return col_idx
         return None
 
-    def _chart_png_from_table(self, table: dict, section_title: str = "") -> Optional[bytes]:
-        """Render a bar chart PNG from a numeric table column. Returns bytes or None."""
+    def _chart_png_from_table(self, table: dict, section_title: str = "",
+                                chart_type: str = "auto") -> Optional[bytes]:
+        """Render a chart PNG from a numeric table column.
+
+        chart_type:
+          "auto"  — pick pie for ≤6 rows with % or shares, bar otherwise (default)
+          "bar"   — force bar
+          "pie"   — force pie
+          "line"  — force line (for time series)
+
+        Returns PNG bytes or None if chart not applicable.
+        """
         try:
             import matplotlib
             matplotlib.use("Agg")
@@ -5274,9 +5284,8 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             return None
         headers = table.get("headers") or []
         rows = table.get("rows") or []
-        # X-axis = column 0 (labels); Y-axis = first numeric column
         labels, values = [], []
-        for row in rows[:20]:  # cap at 20 bars for readability
+        for row in rows[:20]:
             if len(row) <= numeric_col_idx: continue
             label = str(row[0])[:22]
             try:
@@ -5287,23 +5296,71 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 continue
         if len(values) < 2:
             return None
+
+        # Auto-route chart type
+        if chart_type == "auto":
+            col_header = (headers[numeric_col_idx] if numeric_col_idx < len(headers) else "").lower()
+            is_share = any(k in col_header for k in ("share","%","percent","proportion","ratio","distribution","mix","split"))
+            total = sum(abs(v) for v in values)
+            is_time = any(k in (headers[0] if headers else "").lower() for k in ("year","month","quarter","q1","q2","q3","q4","date","period","fy"))
+            if is_time:
+                chart_type = "line"
+            elif (is_share or (len(values) <= 6 and total > 0 and all(v >= 0 for v in values))):
+                chart_type = "pie"
+            else:
+                chart_type = "bar"
+
+        # IBM Carbon categorical palette — 9 distinct colors
+        PALETTE = ["#0F62FE", "#8A3FFC", "#007D79", "#FA4D56", "#FF832B",
+                   "#24A148", "#4589FF", "#D02670", "#161616"]
+
         try:
-            fig, ax = plt.subplots(figsize=(10, 5), dpi=120)
-            bars = ax.bar(labels, values, color="#0F62FE", edgecolor="#0043CE", width=0.7)
-            ax.set_ylabel(headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value",
-                          fontsize=10, color="#525252")
-            ax.set_xlabel(headers[0] if headers else "", fontsize=10, color="#525252")
+            fig, ax = plt.subplots(figsize=(10, 5.2), dpi=120)
             chart_title = section_title or (headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Chart")
-            ax.set_title(str(chart_title)[:60], fontsize=12, color="#161616", pad=12)
-            ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
-            ax.tick_params(axis="x", labelrotation=35, labelsize=9, colors="#525252")
-            ax.tick_params(axis="y", labelsize=9, colors="#525252")
-            ax.grid(axis="y", alpha=0.25, linestyle="--")
-            # Value labels on bars
-            for bar, v in zip(bars, values):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                        f"{v:,.0f}" if v >= 10 else f"{v:,.2f}",
-                        ha="center", va="bottom", fontsize=8, color="#161616")
+
+            if chart_type == "pie":
+                colors = (PALETTE * ((len(values) // len(PALETTE)) + 1))[:len(values)]
+                wedges, texts, autotexts = ax.pie(
+                    values, labels=labels, colors=colors,
+                    autopct='%1.1f%%', startangle=90,
+                    wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+                    textprops={"fontsize": 10, "color": "#161616"},
+                )
+                for at in autotexts:
+                    at.set_color("white"); at.set_fontsize(9); at.set_fontweight("bold")
+                ax.set_title(str(chart_title)[:60], fontsize=13, color="#161616", pad=18, fontweight="600")
+                ax.axis("equal")
+            elif chart_type == "line":
+                ax.plot(labels, values, color="#0F62FE", linewidth=2.5, marker="o",
+                        markersize=7, markerfacecolor="#0F62FE", markeredgecolor="white")
+                ax.fill_between(range(len(values)), values, alpha=0.15, color="#0F62FE")
+                ax.set_ylabel(headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value",
+                              fontsize=10, color="#525252")
+                ax.set_xlabel(headers[0] if headers else "", fontsize=10, color="#525252")
+                ax.set_title(str(chart_title)[:60], fontsize=13, color="#161616", pad=12, fontweight="600")
+                ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+                ax.tick_params(axis="x", labelrotation=25, labelsize=9, colors="#525252")
+                ax.tick_params(axis="y", labelsize=9, colors="#525252")
+                ax.grid(axis="y", alpha=0.25, linestyle="--")
+                for i, v in enumerate(values):
+                    ax.text(i, v, f"{v:,.0f}" if v >= 10 else f"{v:,.2f}",
+                            ha="center", va="bottom", fontsize=8, color="#161616")
+            else:  # bar
+                colors = (PALETTE * ((len(values) // len(PALETTE)) + 1))[:len(values)]
+                bars = ax.bar(labels, values, color=colors, edgecolor="#0043CE", width=0.7)
+                ax.set_ylabel(headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value",
+                              fontsize=10, color="#525252")
+                ax.set_xlabel(headers[0] if headers else "", fontsize=10, color="#525252")
+                ax.set_title(str(chart_title)[:60], fontsize=13, color="#161616", pad=12, fontweight="600")
+                ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+                ax.tick_params(axis="x", labelrotation=35, labelsize=9, colors="#525252")
+                ax.tick_params(axis="y", labelsize=9, colors="#525252")
+                ax.grid(axis="y", alpha=0.25, linestyle="--")
+                for bar, v in zip(bars, values):
+                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                            f"{v:,.0f}" if v >= 10 else f"{v:,.2f}",
+                            ha="center", va="bottom", fontsize=8, color="#161616")
+
             plt.tight_layout()
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
@@ -5317,20 +5374,26 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 
     def _autoinject_charts(self, sections: list) -> list:
         """For any section with a numeric table AND no existing image, render a
-        bar chart PNG from the table data and attach as the section's image."""
+        chart PNG and attach as the section's image.
+
+        Respects a per-section `chart_type` field: "bar" | "pie" | "line" | "auto".
+        If the section has "chart_data" (alternative to table for pure chart intent),
+        use that directly; otherwise derive from the table.
+        """
         out = []
         for s in sections:
             if not isinstance(s, dict):
                 out.append(s); continue
             ns = dict(s)
-            tbl = ns.get("table")
+            tbl = ns.get("table") or ns.get("chart_data")
+            chart_type = ns.get("chart_type", "auto")
             if (tbl and not ns.get("_img_bytes") and not ns.get("image_id") and not ns.get("svg")):
-                png = self._chart_png_from_table(tbl, ns.get("title",""))
+                png = self._chart_png_from_table(tbl, ns.get("title",""), chart_type=chart_type)
                 if png:
                     ns["_img_bytes"] = png
                     ns["_img_width"] = 1200
                     ns["_img_height"] = 600
-                    ns["_img_source"] = "generated:chart"
+                    ns["_img_source"] = f"generated:chart:{chart_type}"
                     ns["image_caption"] = ns.get("image_caption") or f"Chart — {ns.get('title','data')}"
             out.append(ns)
         return out
@@ -5479,7 +5542,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 )
                 tbody_rows.append(f'<tr style="background:{bg}">{tds}</tr>')
             table_html = (
-                f'<table style="border-collapse:collapse;width:100%;font-family:Calibri,sans-serif">'
+                f'<table style="border-collapse:collapse;width:100%;font-family:\"IBM Plex Sans\",Calibri,sans-serif">'
                 f'{thead}{"".join(tbody_rows)}</table>'
             )
             note_html = (
@@ -5496,20 +5559,20 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             )
 
         total = len(sheets)
-        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
 .wk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#fff;display:flex;flex-direction:column}}
 .tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
 .b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
-font-family:Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:#fff;color:{IBM_BLUE_70}}}
+font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:#fff;color:{IBM_BLUE_70}}}
 .sp{{flex:1}}
 .title{{color:#fff;font-size:13px;font-weight:600}}
 .tabs{{display:flex;gap:2px;padding:8px 14px 0;background:{IBM_GRAY_10};flex-wrap:wrap;border-bottom:1px solid {IBM_GRAY_20};flex-shrink:0}}
 .tab{{border:1px solid {IBM_GRAY_20};border-bottom:none;border-radius:6px 6px 0 0;padding:8px 14px;
-font-size:12px;cursor:pointer;font-family:Calibri,sans-serif;font-weight:600;
+font-size:12px;cursor:pointer;font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;
 background:#fff;color:{IBM_GRAY_70}}}
 .tab.active{{background:{IBM_BLUE_60};color:#fff;border-color:{IBM_BLUE_60}}}
 .sw{{background:{IBM_GRAY_10};padding:20px;overflow:auto;flex:1;min-height:0}}
@@ -5572,7 +5635,7 @@ function showTab(i){{
                 f'<a:r><a:rPr lang="en-US" sz="{size}" '
                 f'{b_attr}{i_attr}>'
                 f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
-                f'<a:latin typeface="Calibri"/>'
+                f'<a:latin typeface="IBM Plex Sans"/>'
                 f'</a:rPr><a:t>{esc(text)}</a:t></a:r>'
             )
 
@@ -5876,8 +5939,8 @@ function showTab(i){{
                 '<a:folHlink><a:srgbClr val="8A3FFC"/></a:folHlink>'
                 '</a:clrScheme>'
                 '<a:fontScheme name="IBM">'
-                '<a:majorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>'
-                '<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>'
+                '<a:majorFont><a:latin typeface="IBM Plex Sans"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>'
+                '<a:minorFont><a:latin typeface="IBM Plex Sans"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>'
                 '</a:fontScheme>'
                 '<a:fmtScheme name="Office">'
                 '<a:fillStyleLst>'
@@ -5992,7 +6055,7 @@ function showTab(i){{
         # Cover
         slide_parts.append(
             f'<div class="sl" style="display:block;aspect-ratio:16/9;background:{IBM_BLUE_60};'
-            f'padding:60px;color:#fff;font-family:Calibri,sans-serif;position:relative">'
+            f'padding:60px;color:#fff;font-family:\"IBM Plex Sans\",Calibri,sans-serif;position:relative">'
             f'<div style="font-size:36px;font-weight:700;margin-top:120px">{self._html_esc(title)}</div>'
             f'<div style="font-size:18px;margin-top:24px;opacity:0.9">IBM Consulting  |  Prepared for {self._html_esc(client_name)}</div>'
             f'<div style="font-size:14px;margin-top:12px;opacity:0.8">{time.strftime("%B %Y")}</div>'
@@ -6006,7 +6069,7 @@ function showTab(i){{
 
             text_html = f'<h2 style="font-size:26px;color:{IBM_GRAY_100};font-weight:700;margin:0 0 16px">{self._html_esc(section.get("title", ""))}</h2>'
             for p in section.get("paragraphs", []) or []:
-                text_html += f'<p style="font-size:13px;color:{IBM_GRAY_100};margin:8px 0;line-height:1.4">{self._html_esc(p)}</p>'
+                text_html += f'<p style="font-size:13px;color:{IBM_GRAY_100};margin:8px 0;line-height:1.7">{self._html_esc(p)}</p>'
             bullets = section.get("bullets", []) or []
             if bullets:
                 lis = "".join(
@@ -6032,7 +6095,7 @@ function showTab(i){{
 
             slide_parts.append(
                 f'<div class="sl" style="display:none;aspect-ratio:16/9;background:#fff;'
-                f'border-left:8px solid {IBM_BLUE_60};padding:40px 48px;font-family:Calibri,sans-serif;'
+                f'border-left:8px solid {IBM_BLUE_60};padding:40px 48px;font-family:\"IBM Plex Sans\",Calibri,sans-serif;'
                 f'position:relative">'
                 f'<div style="display:flex;height:100%">'
                 f'<div style="flex:1 1 {text_col_w};padding-right:16px">{text_html}</div>'
@@ -6041,15 +6104,15 @@ function showTab(i){{
             )
 
         total = len(slide_parts)
-        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
 .dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#fff;display:flex;flex-direction:column}}
 .tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
 .b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
-font-family:Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
+font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
 .bw{{background:#fff;color:{IBM_BLUE_70}}}
 .sn{{color:#fff;font-size:12px;min-width:90px;text-align:center}}
 .sp{{flex:1}}
