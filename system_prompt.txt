@@ -58,7 +58,9 @@ For "100-row project plan" requests: (a) top 50 rows only, or (b) split across m
 
 The tool automatically adds these on every output — DO NOT attempt to add them yourself in your sections:
 
-- **IBM logo (0.5 cm × 0.5 cm, reduced from 1 cm)** in the bottom-left of every PPTX slide, every DOCX page footer, and every XLSX sheet (A1 anchor), **immediately followed by "| IBM Consulting 2026"** in IBM Plex Sans 9pt gray.
+- **IBM logo (0.4 cm × 0.4 cm)** in the bottom-left of every PPTX slide, every DOCX page footer, and every XLSX sheet (A1 anchor), **immediately followed by "| IBM Consulting 2026"** in IBM Plex Sans 9pt gray.
+- **Bullets rendered with a clean disc marker**, no numbers in the text. Do NOT prefix bullet strings with "01 ", "1.", "- ", or similar — the tool strips them defensively but avoid emitting them.
+- **Paragraph text is justified** (both-aligned) for a polished client-document look.
 - **Page number "N of M"** on the bottom-right of every DOCX page footer, "N / M" on every PPTX slide, "Sheet N / M" on every XLSX sheet header.
 - **Cover page / cover slide** with title, "IBM Consulting | Prepared for <client>", and current month & year.
 

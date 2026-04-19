@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 18:55 IST (logo 0.5cm + 'IBM Consulting 2026' brand label on PPTX + DOCX)
+# Last synced to OWUI DB: 2026-04-19 19:00 IST (logo 0.4cm, justified paragraphs, strip bullet numbering)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -4692,7 +4692,8 @@ class Tools:
             doc_parts.append(heading_xml(sec_title, level=1))
 
             for para in section.get("paragraphs", []) or []:
-                doc_parts.append(para_xml(run_xml(para, size=22), align="left"))
+                # Justified alignment for polished client-doc look
+                doc_parts.append(para_xml(run_xml(para, size=22), align="both"))
 
             bullets = section.get("bullets", []) or []
             for b in bullets:
@@ -4727,7 +4728,7 @@ class Tools:
             # 1/5 of the previous 0.5-inch tall → ~0.1 inch tall, width by aspect.
             # Requested: smaller, left-aligned IBM mark on every page.
             # 0.5cm x 0.5cm per user policy v7 (reduced 50% from 1cm)
-            footer_h_emu = 180000  # 0.5 cm
+            footer_h_emu = 144000  # 0.4 cm (reduced 20% further per user policy v8)
             footer_w_emu = int(footer_h_emu * (lw / max(lh, 1)))
             rel_entries.append(
                 '<Relationship Id="rIdFooter" '
@@ -4875,7 +4876,7 @@ class Tools:
         if logo_png:
             logo_b64 = base64.b64encode(logo_png).decode()
             # 14px ≈ 0.5 cm at normal screen density (was 28px / 1 cm)
-            logo_img_tag = f'<img src="data:image/png;base64,{logo_b64}" style="height:14px;width:auto;vertical-align:middle" alt="IBM"/>'
+            logo_img_tag = f'<img src="data:image/png;base64,{logo_b64}" style="height:11px;width:auto;vertical-align:middle" alt="IBM"/>'
 
         def footer_html(page_num: int, total_pages: int) -> str:
             """Reusable page footer — IBM logo + '| IBM Consulting 2026' left, Page N of M right."""
@@ -4914,7 +4915,7 @@ class Tools:
             )
             for para in section.get("paragraphs", []) or []:
                 parts.append(
-                    f'<p style="font-size:12px;color:{IBM_GRAY_100};line-height:1.7;margin:8px 0;'
+                    f'<p style="font-size:12px;color:{IBM_GRAY_100};line-height:1.7;margin:8px 0;text-align:justify;'
                     f'font-family:\"IBM Plex Sans\",Calibri,sans-serif">{self._html_esc(para)}</p>'
                 )
             bullets = section.get("bullets", []) or []
@@ -5482,6 +5483,17 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             out.append(ns)
         return out
 
+    _BULLET_NUMBER_PREFIX = re.compile(r'^\s*(?:\d{1,3}[\.\)\-:]|\d{2}\s|\u2022\s|[-\*]\s|[a-zA-Z][\.\)])\s*')
+
+    def _strip_bullet_numbering(self, bullet: str) -> str:
+        """Strip '01 ', '1.', '1)', '- ', '* ', 'a)' and similar leading markers from
+        a bullet string. The renderer already supplies a bullet glyph; having numbers
+        inside the text too is ugly."""
+        if not isinstance(bullet, str):
+            return bullet
+        cleaned = self._BULLET_NUMBER_PREFIX.sub('', bullet).strip()
+        return cleaned or bullet
+
     def _enforce_content_caps(self, sections: list, fmt: str) -> list:
         """Truncate each section's text/rows so the rendered output respects
         the hard content caps. Pure defensive — the system prompt asks the LLM
@@ -5496,7 +5508,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 # Count words (excluding image caption / speaker notes — those are separate)
                 title = ns.get("title") or ""
                 paras = list(ns.get("paragraphs") or [])
-                bullets = list(ns.get("bullets") or [])
+                bullets = [self._strip_bullet_numbering(b) for b in (ns.get("bullets") or [])]
                 used = len(title.split())
                 new_paras, new_bullets = [], []
                 for p in paras:
@@ -5529,7 +5541,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 ns = dict(s)
                 title = ns.get("title") or ""
                 paras = list(ns.get("paragraphs") or [])
-                bullets = list(ns.get("bullets") or [])
+                bullets = [self._strip_bullet_numbering(b) for b in (ns.get("bullets") or [])]
                 used = len(title.split())
                 new_paras, new_bullets = [], []
                 for p in paras:
@@ -5790,7 +5802,7 @@ function showTab(i){{
             media_files.append((logo_fname, logo_png))
             lw, lh = self._get_ibm_logo_dims()
             # 0.5cm x 0.5cm per user policy v7 (reduced 50% from 1cm)
-            logo_h_emu = 180000  # 0.5 cm
+            logo_h_emu = 144000  # 0.4 cm (reduced 20% further per user policy v8)
             logo_w_emu = int(logo_h_emu * (lw / max(lh, 1)))
             logo_x_emu = 228600  # 0.25in left margin
             logo_y_emu = SLIDE_H_EMU - logo_h_emu - 114300  # 0.125in bottom margin
