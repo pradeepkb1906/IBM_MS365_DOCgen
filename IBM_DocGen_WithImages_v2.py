@@ -26,7 +26,13 @@ import requests
 from pydantic import BaseModel, Field
 from PIL import Image
 
-import fitz  # PyMuPDF
+try:
+    import fitz  # PyMuPDF — optional; used for PDF text + image extraction + page rendering
+    HAS_FITZ = True
+except ImportError:
+    fitz = None  # type: ignore[assignment]
+    HAS_FITZ = False
+    print("[DocGen] PyMuPDF (fitz) not installed — PDF extraction disabled. Install with: pip install pymupdf")
 
 from fastapi.responses import HTMLResponse
 
@@ -3351,6 +3357,9 @@ class Tools:
         chunks = []
         try:
             if ext in PDF_EXT:
+                if not HAS_FITZ:
+                    print("[DocGen] PDF text extraction skipped — PyMuPDF not installed in this environment.")
+                    return []
                 doc = fitz.open(stream=file_bytes, filetype="pdf")
                 try:
                     for page_num, page in enumerate(doc):
@@ -3669,6 +3678,9 @@ class Tools:
     # ── PDF ──
     def _extract_pdf_images(self, pdf_bytes: bytes, src: dict) -> list[dict]:
         out = []
+        if not HAS_FITZ:
+            print("[DocGen] PDF image extraction skipped — PyMuPDF not installed in this environment.")
+            return out
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         try:
             for page_num, page in enumerate(doc):
