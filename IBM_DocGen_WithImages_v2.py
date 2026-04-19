@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 17:30 IST (caps 100/500, IBM Plex Sans, pie/bar/line auto-routed charts)
+# Last synced to OWUI DB: 2026-04-19 17:50 IST (ETA countdown, mandatory 100w/slide 450w/page, "info not available" fill)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -1064,7 +1064,7 @@ class Tools:
                     "text_chunks": [], "images": []
                 })
             await self._emit(__event_emitter__, f"📎 Processing {len(attachment_file_ids)} attachment(s)...")
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_attachments'), initial_phase='📎 Extracting from attachments')
             auth = self._auth_from_request(__request__)
 
             text_chunks, all_images = await asyncio.to_thread(
@@ -1109,7 +1109,7 @@ class Tools:
         _hb = None
         try:
             await self._emit(__event_emitter__, f"🌐 Searching: {query}")
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_web_search'), initial_phase='🌐 Searching the web')
             text_chunks = self._web_search_text(query, num_text_results)
             await self._emit(__event_emitter__, f"📚 {len(text_chunks)} web results")
 
@@ -1329,7 +1329,7 @@ class Tools:
         try:
             auth = self._auth_from_request(__request__)
             all_text, all_images = [], []
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_smart'), initial_phase='📥 Gathering content from all sources')
 
             if knowledge_collection_id:
                 await self._emit(__event_emitter__, "🔍 Knowledge collection...")
@@ -1549,7 +1549,7 @@ class Tools:
             all_text: list[dict] = []
             all_images: list[dict] = []
             source_log: list[str] = []
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_smart'), initial_phase='📥 Gathering content from all sources')
 
             # Auto-detect chat attachments from OWUI-injected __files__.
             if not attachment_file_ids and __files__:
@@ -1722,7 +1722,7 @@ class Tools:
         _hb = None
         try:
             await self._emit(__event_emitter__, f"📝 Assembling {format.upper()}...")
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('assemble_document'), initial_phase='📝 Assembling document')
 
             try:
                 sections = json.loads(sections_json) if isinstance(sections_json, str) else sections_json
@@ -1859,7 +1859,7 @@ class Tools:
         _hb = None
         try:
             await self._emit(__event_emitter__, f"🎨 Creating visualization: {title}")
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('render_visualization'), initial_phase='🧩 Rendering visualization')
             html = _build_svg_shell(html_code, title=title)
             await self._emit(__event_emitter__, f"✅ {title} ready", done=True)
             await self._stop_heartbeat(_hb)
@@ -1935,7 +1935,7 @@ class Tools:
 
             await self._emit(__event_emitter__,
                 f"🎨 Enriching {len(sections)} section(s) with 1 hero image (text-only for the rest)")
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('enrich_sections_with_images'), initial_phase='🎨 Image enrichment')
 
             # Partition: skip sections that already have imagery; enqueue the rest.
             # THEN apply image-count cap — a 5-slide deck only needs ~1 image, not 5.
@@ -2127,7 +2127,7 @@ class Tools:
         _hb = None
         try:
             await self._emit(__event_emitter__, f"🖼️ Generating image: {prompt[:60]}")
-            _hb = self._start_heartbeat(__event_emitter__)
+            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('generate_image'), initial_phase='🖼️ Fetching image')
             auth = self._auth_from_request(__request__)
 
             resolved_kind = kind
@@ -6192,46 +6192,84 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             self._phase = msg
             self._phase_started = time.time()
 
-    def _set_phase(self, text: str):
-        """Update the current phase shown by the heartbeat ticker."""
+    def _set_phase(self, text: str, eta_seconds: Optional[int] = None):
+        """Update the current phase shown by the heartbeat ticker.
+
+        eta_seconds — optional estimated duration. When set, the heartbeat
+        shows a COUNTDOWN ("~8s remaining") instead of elapsed time. The
+        countdown floors at 1s once exceeded (never negative).
+        """
         self._phase = text
         self._phase_started = time.time()
+        self._phase_eta = int(eta_seconds) if eta_seconds else None
 
-    async def _heartbeat(self, emitter, interval: int = 10):
+    async def _heartbeat(self, emitter, interval: int = 3):
         """Emit a blue-info status every 'interval' seconds while work runs.
 
-        OWUI renders status events in its info/accent (blue) style, so the
-        user keeps seeing a live update of which phase we are in and how long
-        it has been running. Cancel this task when the operation completes.
+        If _phase_eta is set, shows a COUNTDOWN: "⏳ ~Xs remaining — phase".
+        Otherwise shows elapsed: "⏱️ Xs — phase".
+
+        Default interval is now 3 s (was 10) so the countdown feels responsive.
         """
         if not emitter:
             return
         try:
+            # First emit after 1s so user sees the ETA quickly, then every `interval`.
+            await asyncio.sleep(1)
             while True:
-                await asyncio.sleep(interval)
                 elapsed = int(time.time() - (self._phase_started or time.time()))
                 phase = self._phase or "working"
-                # Info (blue) icon + bold-ish phrasing. Markdown in status
-                # descriptions renders as plain text in OWUI but the info
-                # style already shows in blue.
+                eta = getattr(self, "_phase_eta", None)
+                if eta is not None:
+                    remaining = max(1, eta - elapsed)
+                    if elapsed > eta:
+                        # Exceeded ETA — switch to elapsed with an honest signal
+                        desc = f"🔵 ⏱️ {elapsed}s (over estimate) — {phase}"
+                    else:
+                        desc = f"🔵 ⏳ ~{remaining}s remaining ({elapsed}s elapsed) — {phase}"
+                else:
+                    desc = f"🔵 ⏱️ {elapsed}s — {phase}"
                 await emitter({
                     "type": "status",
-                    "data": {
-                        "description": f"🔵 ⏱️ {elapsed}s — {phase}",
-                        "done": False,
-                    },
+                    "data": {"description": desc, "done": False},
                 })
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             return
 
-    def _start_heartbeat(self, emitter, interval: int = 10):
-        """Spawn a heartbeat task; returns the task so callers can cancel it."""
+    def _start_heartbeat(self, emitter, interval: int = 3, eta_seconds: Optional[int] = None,
+                         initial_phase: Optional[str] = None):
+        """Spawn a heartbeat task; returns the task so callers can cancel it.
+
+        eta_seconds — optional ETA in seconds for countdown display.
+        initial_phase — optional phase text to set before first tick.
+        """
         if not emitter:
             return None
+        if initial_phase:
+            self._set_phase(initial_phase, eta_seconds=eta_seconds)
+        elif eta_seconds is not None:
+            self._phase_eta = int(eta_seconds)
+            self._phase_started = time.time()
         try:
             return asyncio.create_task(self._heartbeat(emitter, interval))
         except RuntimeError:
             return None
+
+    # Known ETAs per phase (rough, per benchmark). Used as countdown hints.
+    _PHASE_ETA_DEFAULT = {
+        "prepare_content_smart":          8,
+        "prepare_content_from_web_search": 6,
+        "prepare_content_from_attachments": 10,
+        "enrich_sections_with_images":    3,
+        "generate_image":                 4,
+        "assemble_document":              2,
+        "render_visualization":           1,
+    }
+
+    def _eta_for(self, phase_key: str, scale: float = 1.0) -> int:
+        base = self._PHASE_ETA_DEFAULT.get(phase_key, 5)
+        return max(1, int(base * scale))
 
     @staticmethod
     async def _stop_heartbeat(task):
