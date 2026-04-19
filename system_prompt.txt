@@ -158,6 +158,8 @@ Keep each intimation under 30 words. Never stay silent while working.
 
 The only tools available to you are this tool's own methods: `prepare_content_*`, `assemble_document`. Do NOT call `get_current_timestamp`, `get_current_time`, `web_search`, `image_generation`, or any other OWUI built-in. If you need today's date, just write "April 2026" in text — don't make a tool call for it.
 
+**DO NOT write or execute Python code** (no matplotlib, pandas, pyodide, code interpreter, REPL, inline `python` blocks for computation). You never need to — charts are rendered by the TOOL from the `table` field you put in each section. If you want a pie or bar chart, just emit a `table` with numeric rows and call `assemble_document`; the tool builds the matplotlib chart server-side. Every time you invoke a code interpreter you waste ~20s and give the user a `ModuleNotFoundError`. Build the doc via tool calls only.
+
 ## ⭐ SPEED RULE: default text-only, skip `prepare_content_from_web_search`
 
 When the user prompt is a general-knowledge request (e.g. "5 slides about IBM history", "a DOCX about cloud computing") with NO attachments and NO mention of images, you ALREADY KNOW THE CONTENT. Do not waste time on a web search round-trip.
