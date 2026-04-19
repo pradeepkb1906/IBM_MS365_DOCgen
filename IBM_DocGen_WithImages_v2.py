@@ -2118,7 +2118,7 @@ class Tools:
 
             # Strip WEB-image references only (image_id, svg, image_hint); keep
             # chart_type + chart_data because those drive native OOXML chart
-            # parts built from table data — no network, no matplotlib.
+            # parts built from table data — no network, no external renderer.
             stripped = []
             for s in resolved_sections:
                 if isinstance(s, dict):
@@ -2133,7 +2133,7 @@ class Tools:
 
             # Auto-inject chart specs for sections with numeric tables.
             # Builders emit these as NATIVE OOXML chart parts (c:chartSpace) —
-            # no matplotlib, no PNG rasterization. HTML preview uses inline SVG.
+            # no external charting library, no PNG rasterization. HTML preview uses inline SVG.
             if format in ("docx", "pptx", "xlsx"):
                 resolved_sections = self._autoinject_charts(resolved_sections)
 
@@ -5808,7 +5808,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         """Extract a chart specification (labels, values, type, title) from a
         numeric-column table. Returns None if the table isn't chartable.
 
-        NO matplotlib, NO external libraries — pure-Python dict. The caller
+        Pure-Python dict, zero external libraries. The caller
         decides whether to render as OOXML (native Office chart) or inline
         SVG (for HTML preview).
 
@@ -6052,7 +6052,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         )
 
     # ──────────────────────────────────────────────────────────────────────
-    # Pure-Python SVG chart (HTML iframe preview only — no matplotlib)
+    # Pure-Python SVG chart (HTML iframe preview only — zero dependencies)
     # ──────────────────────────────────────────────────────────────────────
     def _svg_chart_from_spec(self, spec: dict, width: int = 720, height: int = 360) -> str:
         """Render an inline SVG chart (bar/pie/line) from a chart spec.
