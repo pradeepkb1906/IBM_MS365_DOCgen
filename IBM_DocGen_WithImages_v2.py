@@ -2325,8 +2325,8 @@ class Tools:
 
     # Circuit-breaker state (class-level so all parallel workers share it).
     # When a source returns 429 / 5xx / bulk failures, we trip the breaker for
-    # `_SOURCE_COOLDOWN_S` seconds so subsequent workers skip that source
-    # immediately instead of piling on and wasting request_timeout × N.
+    # _SOURCE_COOLDOWN_S seconds so subsequent workers skip that source
+    # immediately instead of piling on and wasting request_timeout x N.
     _SOURCE_COOLDOWN_S = 30.0
     _source_breakers: dict = {}   # {source_name: unix_ts_until_which_open}
     _breakers_lock = threading.Lock()
