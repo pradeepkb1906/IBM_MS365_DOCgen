@@ -1,11 +1,4 @@
-"""
-# Last synced to OWUI DB: 2026-04-19 20:10 IST (caps 15/15/10+100, Notes + Folder sources, smart merges notes+folder+attachments+knowledge+MCP)
-title: IBM DocGen with Images (MCP-aware)
-author: Deepu
-version: 2.0
-description: Single-file tool that generates IBM-branded DOCX and PPTX with RAG-grounded text AND runtime-extracted relevant images. Sources: OWUI knowledge collections, chat attachments, web search, or MCP servers (ICA Context Forge / any MCP Streamable-HTTP server). Extracts images from MCP tool results and ui:// resources. Renders inline in chat with download button. Fully in-memory, no disk writes.
-requirements: pymupdf, pillow, requests
-"""
+"""# Last synced to OWUI DB: 2026-04-19 20:10 IST (caps 15/15/10+100, Notes + Folder sources, smart merges not..."""
 import re
 import json
 import base64
@@ -21,21 +14,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Literal, Any
 from xml.etree import ElementTree as ET
 from urllib.parse import urlparse
-
 import requests
 from pydantic import BaseModel, Field
 from PIL import Image
-
 try:
-    import fitz  # PyMuPDF — optional; used for PDF text + image extraction + page rendering
+    import fitz
     HAS_FITZ = True
 except ImportError:
-    fitz = None  # type: ignore[assignment]
+    fitz = None
     HAS_FITZ = False
     print("[DocGen] PyMuPDF (fitz) not installed — PDF extraction disabled. Install with: pip install pymupdf")
-
 from fastapi.responses import HTMLResponse
-
 try:
     from openpyxl import load_workbook, Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -43,19 +32,13 @@ try:
     HAS_XLSX = True
 except ImportError:
     HAS_XLSX = False
-
 try:
-    # macOS strips DYLD_* env vars from child processes launched via
-    # launchd / GUI, so OWUI often has no cairo library search path. Fix by
-    # discovering libcairo on disk and adding its directory to
-    # DYLD_FALLBACK_LIBRARY_PATH BEFORE importing cairosvg (cairocffi reads
-    # it inside cffi.dlopen on each module import).
     import os as _os
     _CAIRO_CANDIDATES = [
-        "/opt/homebrew/lib/libcairo.2.dylib",   # Homebrew (Apple Silicon)
-        "/usr/local/lib/libcairo.2.dylib",      # Homebrew (Intel)
-        "/opt/local/lib/libcairo.2.dylib",      # MacPorts
-        "/usr/lib/libcairo.so.2",               # Linux system
+        "/opt/homebrew/lib/libcairo.2.dylib",
+        "/usr/local/lib/libcairo.2.dylib",
+        "/opt/local/lib/libcairo.2.dylib",
+        "/usr/lib/libcairo.so.2",
     ]
     for _p in _CAIRO_CANDIDATES:
         if _os.path.exists(_p):
@@ -65,7 +48,6 @@ try:
                 _os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = (
                     _dir + (":" + _existing if _existing else "")
                 )
-            # Linux equivalent
             _existing_ld = _os.environ.get("LD_LIBRARY_PATH", "")
             if _dir not in _existing_ld.split(":"):
                 _os.environ["LD_LIBRARY_PATH"] = (
@@ -73,18 +55,11 @@ try:
                 )
             break
     del _os, _CAIRO_CANDIDATES
-
     import cairosvg
     HAS_CAIROSVG = True
 except (ImportError, OSError) as _cairo_err:
-    # OSError: libcairo not found; ImportError: cairosvg package missing
     HAS_CAIROSVG = False
     print(f"[DocGen] cairosvg unavailable: {_cairo_err}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════════════════
 PDF_EXT = {".pdf"}
 DOCX_EXT = {".docx"}
 PPTX_EXT = {".pptx"}
@@ -93,12 +68,9 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 SVG_EXT = {".svg"}
 ALL_DOC_EXT = PDF_EXT | DOCX_EXT | PPTX_EXT | XLSX_EXT
 ALL_IMG_EXT = IMG_EXT | SVG_EXT
-
 NS_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 NS_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 NS_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-
-# IBM Carbon palette
 IBM_BLUE_60 = "#0F62FE"
 IBM_BLUE_70 = "#0043CE"
 IBM_GRAY_100 = "#161616"
@@ -106,61 +78,50 @@ IBM_GRAY_70 = "#525252"
 IBM_GRAY_20 = "#E0E0E0"
 IBM_GRAY_10 = "#F4F4F4"
 IBM_WHITE = "#FFFFFF"
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SVG / Architecture-diagram engine (ported from Inline_Visualizer_v5)
-# ═══════════════════════════════════════════════════════════════════════════
-# Design system for inline SVG diagrams, architecture maps, flow charts, KPI
-# dashboards. When the LLM provides raw SVG or HTML via the render_visualization
-# tool, OR emits section.svg in assemble_document sections, this shell wraps it
-# with IBM Carbon theming, auto-sizing, and SVG/PNG/JPG download buttons.
-
 SVG_THEME_CSS = """
 :root {
-  --color-text-primary: #161616;
-  --color-text-secondary: #525252;
-  --color-text-tertiary: #8D8D8D;
-  --color-text-info: #0043CE;
-  --color-text-success: #24A148;
-  --color-text-warning: #F1C21B;
-  --color-text-danger: #DA1E28;
-  --color-bg-primary: #FFFFFF;
-  --color-bg-secondary: #F4F4F4;
-  --color-bg-tertiary: #E0E0E0;
-  --color-border-tertiary: #E0E0E0;
-  --color-border-secondary: #8D8D8D;
-  --color-border-primary: #525252;
+  --color-text-primary:
+  --color-text-secondary:
+  --color-text-tertiary:
+  --color-text-info:
+  --color-text-success:
+  --color-text-warning:
+  --color-text-danger:
+  --color-bg-primary:
+  --color-bg-secondary:
+  --color-bg-tertiary:
+  --color-border-tertiary:
+  --color-border-secondary:
+  --color-border-primary:
   --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
   --font-mono: 'IBM Plex Mono', 'SF Mono', Menlo, Consolas, monospace;
-  --primary: #0F62FE;
-  --accent: #0F62FE;
-  --ramp-purple-fill:#EEEDFE; --ramp-purple-stroke:#534AB7; --ramp-purple-th:#3C3489; --ramp-purple-ts:#534AB7;
-  --ramp-teal-fill:#E1F5EE;   --ramp-teal-stroke:#0F6E56;   --ramp-teal-th:#085041;   --ramp-teal-ts:#0F6E56;
-  --ramp-coral-fill:#FAECE7;  --ramp-coral-stroke:#993C1D;  --ramp-coral-th:#712B13;  --ramp-coral-ts:#993C1D;
-  --ramp-pink-fill:#FBEAF0;   --ramp-pink-stroke:#993556;   --ramp-pink-th:#72243E;   --ramp-pink-ts:#993556;
-  --ramp-gray-fill:#F1EFE8;   --ramp-gray-stroke:#5F5E5A;   --ramp-gray-th:#444441;   --ramp-gray-ts:#5F5E5A;
-  --ramp-blue-fill:#E6F1FB;   --ramp-blue-stroke:#185FA5;   --ramp-blue-th:#0C447C;   --ramp-blue-ts:#185FA5;
-  --ramp-green-fill:#EAF3DE;  --ramp-green-stroke:#3B6D11;  --ramp-green-th:#27500A;  --ramp-green-ts:#3B6D11;
-  --ramp-amber-fill:#FAEEDA;  --ramp-amber-stroke:#854F0B;  --ramp-amber-th:#633806;  --ramp-amber-ts:#854F0B;
-  --ramp-red-fill:#FCEBEB;    --ramp-red-stroke:#A32D2D;    --ramp-red-th:#791F1F;    --ramp-red-ts:#A32D2D;
+  --primary:
+  --accent:
+  --ramp-purple-fill:
+  --ramp-teal-fill:
+  --ramp-coral-fill:
+  --ramp-pink-fill:
+  --ramp-gray-fill:
+  --ramp-blue-fill:
+  --ramp-green-fill:
+  --ramp-amber-fill:
+  --ramp-red-fill:
 }
 :root[data-theme="dark"] {
-  --color-text-primary: #F4F4F4; --color-text-secondary: #C6C6C6; --color-text-tertiary: #8D8D8D;
-  --color-bg-primary: #161616; --color-bg-secondary: #262626; --color-bg-tertiary: #393939;
-  --color-border-tertiary: #393939; --color-border-secondary: #525252; --color-border-primary: #8D8D8D;
-  --ramp-purple-fill:#3C3489; --ramp-purple-stroke:#AFA9EC; --ramp-purple-th:#CECBF6; --ramp-purple-ts:#AFA9EC;
-  --ramp-teal-fill:#085041;   --ramp-teal-stroke:#5DCAA5;   --ramp-teal-th:#9FE1CB;   --ramp-teal-ts:#5DCAA5;
-  --ramp-coral-fill:#712B13;  --ramp-coral-stroke:#F0997B;  --ramp-coral-th:#F5C4B3;  --ramp-coral-ts:#F0997B;
-  --ramp-pink-fill:#72243E;   --ramp-pink-stroke:#ED93B1;   --ramp-pink-th:#F4C0D1;   --ramp-pink-ts:#ED93B1;
-  --ramp-gray-fill:#444441;   --ramp-gray-stroke:#B4B2A9;   --ramp-gray-th:#D3D1C7;   --ramp-gray-ts:#B4B2A9;
-  --ramp-blue-fill:#0C447C;   --ramp-blue-stroke:#85B7EB;   --ramp-blue-th:#B5D4F4;   --ramp-blue-ts:#85B7EB;
-  --ramp-green-fill:#27500A;  --ramp-green-stroke:#97C459;  --ramp-green-th:#C0DD97;  --ramp-green-ts:#97C459;
-  --ramp-amber-fill:#633806;  --ramp-amber-stroke:#EF9F27;  --ramp-amber-th:#FAC775;  --ramp-amber-ts:#EF9F27;
-  --ramp-red-fill:#791F1F;    --ramp-red-stroke:#F09595;    --ramp-red-th:#F7C1C1;    --ramp-red-ts:#F09595;
+  --color-text-primary:
+  --color-bg-primary:
+  --color-border-tertiary:
+  --ramp-purple-fill:
+  --ramp-teal-fill:
+  --ramp-coral-fill:
+  --ramp-pink-fill:
+  --ramp-gray-fill:
+  --ramp-blue-fill:
+  --ramp-green-fill:
+  --ramp-amber-fill:
+  --ramp-red-fill:
 }
 """
-
 SVG_CLASSES_CSS = """
 .t  { font: 400 14px/1.4 var(--font-sans); fill: var(--color-text-primary); }
 .ts { font: 400 12px/1.4 var(--font-sans); fill: var(--color-text-secondary); }
@@ -189,7 +150,6 @@ SVG_CLASSES_CSS = """
 .c-red>rect,.c-red>circle,.c-red>ellipse{fill:var(--ramp-red-fill);stroke:var(--ramp-red-stroke);stroke-width:.5}
 .c-red>.th{fill:var(--ramp-red-th)!important} .c-red>.ts{fill:var(--ramp-red-ts)!important}
 """
-
 SVG_BASE_STYLES = """
 * { box-sizing: border-box; margin: 0; font-family: var(--font-sans); }
 html, body { overflow: hidden; }
@@ -204,7 +164,6 @@ button { background: transparent; border: 0.5px solid var(--color-border-seconda
 button:hover { background: var(--color-bg-secondary); }
 .responsive-container { width: 100%; max-width: 100%; overflow-x: auto; }
 """
-
 SVG_BODY_SCRIPTS = """
 <script>
 // SVG download bar — auto-injected when an SVG is present.
@@ -230,22 +189,16 @@ fit();setTimeout(fit,100);setTimeout(fit,500);window.addEventListener('load',fit
 new MutationObserver(fit).observe(document.documentElement,{attributes:true,childList:true,subtree:true});})();
 </script>
 """
-
 _SVG_WRAPPER_TAG_RE = re.compile(
     r"<!DOCTYPE[^>]*>|</?html[^>]*>|</?head[^>]*>|</?body[^>]*>|<meta[^>]*/?>",
     re.IGNORECASE,
 )
-
 def _sanitize_svg_content(content: str) -> str:
-    """Strip document wrapper tags that LLMs sometimes include."""
-    if not content:
-        return ""
+    if not content: return ""
     content = _SVG_WRAPPER_TAG_RE.sub("", content)
     content = re.sub(r"\n{3,}", "\n\n", content)
     return content.strip()
-
 def _build_svg_shell(content: str, title: str = "Diagram") -> str:
-    """Wrap raw SVG/HTML fragment with IBM Carbon theming + SVG download bar."""
     content = _sanitize_svg_content(content)
     return (
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
@@ -256,33 +209,22 @@ def _build_svg_shell(content: str, title: str = "Diagram") -> str:
         f"{SVG_BODY_SCRIPTS}"
         "</body></html>"
     )
-
 def _svg_to_png_bytes(svg_str: str, output_width: int = 1200) -> Optional[bytes]:
-    """Rasterize an SVG string to PNG bytes. Returns None if cairosvg is unavailable."""
-    if not HAS_CAIROSVG or not svg_str:
-        return None
+    if not HAS_CAIROSVG or not svg_str: return None
     try:
         svg_clean = _sanitize_svg_content(svg_str)
-        if not svg_clean.lstrip().startswith("<svg"):
-            return None
+        if not svg_clean.lstrip().startswith("<svg"): return None
         return cairosvg.svg2png(bytestring=svg_clean.encode("utf-8"), output_width=output_width)
     except Exception as e:
         print(f"[DocGen] SVG rasterization failed: {e}")
         return None
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Process-wide in-memory store (survives across tool invocations in same pod)
-# ═══════════════════════════════════════════════════════════════════════════
 class _ImageStore:
     MAX_IMAGES = 600
-    MAX_BYTES = 500 * 1024 * 1024  # 500 MB cap across all stored PNGs
-    TTL_SECONDS = 3600  # 60 min
-
+    MAX_BYTES = 500 * 1024 * 1024
+    TTL_SECONDS = 3600
     def __init__(self):
         self._store = {}
         self._lock = threading.Lock()
-
     def put(self, img_id: str, png_bytes: bytes, metadata: dict):
         with self._lock:
             self._store[img_id] = {
@@ -292,102 +234,68 @@ class _ImageStore:
                 "pinned": False,
             }
             self._evict()
-
     def pin(self, img_id: str, display_id: Optional[str] = None):
-        """Mark an image as pinned so byte-budget eviction never drops it.
-        Also refreshes created_at so TTL eviction gives it the full hour.
-        Optionally records the display_id (e.g. 'IMG1') in metadata so the
-        LLM can reference it by that short alias in sections_json.
-        """
         with self._lock:
             rec = self._store.get(img_id)
-            if not rec:
-                return
+            if not rec: return
             rec["pinned"] = True
             rec["created_at"] = time.time()
             if display_id:
                 rec["metadata"]["display_id"] = display_id
-
     def get_bytes(self, img_id: str) -> Optional[bytes]:
         with self._lock:
             rec = self._store.get(img_id)
             return rec["png_bytes"] if rec else None
-
     def get_metadata(self, img_id: str) -> Optional[dict]:
         with self._lock:
             rec = self._store.get(img_id)
             return rec["metadata"] if rec else None
-
     def get_by_display_id(self, display_id: str) -> tuple:
-        """Fallback: scan for an entry whose metadata display_id matches (e.g. 'IMG1')."""
         with self._lock:
             for rec in self._store.values():
-                if rec["metadata"].get("display_id") == display_id:
-                    return rec["png_bytes"], rec["metadata"]
+                if rec["metadata"].get("display_id") == display_id: return rec["png_bytes"], rec["metadata"]
         return None, None
-
     def _evict(self):
         now = time.time()
-        # TTL: never evict pinned entries.
         expired = [k for k, v in self._store.items()
                    if not v.get("pinned") and now - v["created_at"] > self.TTL_SECONDS]
         for k in expired:
             del self._store[k]
-        # Count-based: only evict unpinned.
         def _unpinned_oldest():
             cands = [(k, v["created_at"]) for k, v in self._store.items() if not v.get("pinned")]
             return min(cands, key=lambda p: p[1])[0] if cands else None
         while len(self._store) > self.MAX_IMAGES:
             k = _unpinned_oldest()
-            if not k:
-                break
+            if not k: break
             del self._store[k]
-        # Byte-budget: only evict unpinned.
         def _total():
             return sum(len(v["png_bytes"]) for v in self._store.values())
         while _total() > self.MAX_BYTES and self._store:
             k = _unpinned_oldest()
-            if not k:
-                break
+            if not k: break
             del self._store[k]
-
-
 _IMAGE_STORE = _ImageStore()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Per-process extraction cache — keyed on a stable hash of file bytes so that
-# a second request on the same PPTX/DOCX/PDF reuses the already-extracted
-# (text_chunks, image_candidates) instead of re-rendering every slide.
-# ═══════════════════════════════════════════════════════════════════════════
 class _ExtractionCache:
     TTL_SECONDS = 3600
     MAX_ENTRIES = 64
-
     def __init__(self):
         self._store = {}
         self._lock = threading.Lock()
-
     def _hash(self, file_bytes: bytes) -> str:
-        # First + last 64KB + length is collision-resistant for real documents
-        # and ~500× faster than hashing the whole file.
         h = hashlib.sha1()
         h.update(str(len(file_bytes)).encode())
         h.update(file_bytes[:65536])
         h.update(file_bytes[-65536:])
         return h.hexdigest()
-
     def get(self, file_bytes: bytes):
         key = self._hash(file_bytes)
         with self._lock:
             rec = self._store.get(key)
-            if not rec:
-                return None
+            if not rec: return None
             if time.time() - rec["t"] > self.TTL_SECONDS:
                 del self._store[key]
                 return None
             return rec["text"], rec["images"]
-
     def put(self, file_bytes: bytes, text_chunks: list, images: list):
         key = self._hash(file_bytes)
         with self._lock:
@@ -395,21 +303,12 @@ class _ExtractionCache:
             while len(self._store) > self.MAX_ENTRIES:
                 oldest = min(self._store.keys(), key=lambda k: self._store[k]["t"])
                 del self._store[oldest]
-
-
 _EXTRACT_CACHE = _ExtractionCache()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Per-session document buffer (same lifetime pattern as Inline_Visualizer_v5)
-# ═══════════════════════════════════════════════════════════════════════════
 class _DocBuffer:
     TTL_SECONDS = 600
-
     def __init__(self):
         self._sessions = {}
         self._lock = threading.Lock()
-
     def ensure(self, session_id: str, title: str, fmt: str):
         with self._lock:
             self._cleanup()
@@ -417,162 +316,90 @@ class _DocBuffer:
                 self._sessions[session_id] = {
                     "title": title,
                     "format": fmt,
-                    "pages": {},  # page_num → elements list
-                    "image_refs": [],  # image IDs used (for tracking)
+                    "pages": {},
+                    "image_refs": [],
                     "created_at": time.time(),
                 }
             return self._sessions[session_id]
-
     def add_page(self, session_id: str, page_num: int, elements: list):
         with self._lock:
             if session_id in self._sessions:
                 self._sessions[session_id]["pages"][page_num] = elements
-
     def pop(self, session_id: str):
-        with self._lock:
-            return self._sessions.pop(session_id, None)
-
+        with self._lock: return self._sessions.pop(session_id, None)
     def get(self, session_id: str):
-        with self._lock:
-            return self._sessions.get(session_id)
-
+        with self._lock: return self._sessions.get(session_id)
     def _cleanup(self):
         now = time.time()
         expired = [k for k, v in self._sessions.items() if now - v["created_at"] > self.TTL_SECONDS]
         for k in expired:
             del self._sessions[k]
-
-
 _DOC_BUFFER = _DocBuffer()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# MCP client — supports BOTH transports
-#
-# 1. Classic SSE transport (IBM ContextForge / agent-studio, MCP 2024-11-05):
-#    - URL ends in /sse. GET opens a persistent event stream.
-#    - First event: "event: endpoint\ndata: <messages_url_with_session_id>"
-#    - Client POSTs JSON-RPC to that messages URL. Responses arrive on the GET stream.
-#
-# 2. Streamable-HTTP transport (MCP 2025-06-18):
-#    - Single endpoint (often /mcp). POST JSON-RPC directly.
-#    - Response is JSON, or SSE on the same POST connection.
-#    - Session tracked via Mcp-Session-Id header.
-#
-# We auto-detect by URL shape (/sse suffix → classic) with fallback probing.
-# Dependency-free: just 'requests'. No 'mcp' SDK required — single file.
-# ═══════════════════════════════════════════════════════════════════════════
 class _MCPClient:
-    """
-    Dual-transport MCP client. One instance per MCP server URL.
-    Use transport= to force a mode, else auto-detect.
-    """
-
-    TRANSPORT_SSE = "sse"            # classic SSE (GET /sse + POST /messages)
-    TRANSPORT_STREAMABLE = "stream"  # streamable-HTTP (POST /mcp with SSE body)
-
+    """Dual-transport MCP client. One instance per MCP server URL."""
+    TRANSPORT_SSE = "sse"
+    TRANSPORT_STREAMABLE = "stream"
     def __init__(self, url: str, headers: Optional[dict] = None,
                  timeout: int = 60, transport: Optional[str] = None):
         self.url = url.rstrip("/")
         self.headers = dict(headers or {})
-        # For Streamable-HTTP the POST body is JSON; for classic SSE the POST body
-        # is also JSON. Accept covers both response types.
         self.headers.setdefault("Accept", "application/json, text/event-stream")
         self.timeout = timeout
-
         self._transport = transport or self._detect_transport()
         self._lock = threading.Lock()
         self._next_id = 0
         self._initialized = False
-
-        # Streamable-HTTP state
         self._session_id: Optional[str] = None
-
-        # Classic SSE state
         self._sse_thread: Optional[threading.Thread] = None
         self._sse_response = None
         self._messages_url: Optional[str] = None
-        self._pending: dict = {}            # rpc_id → threading.Event
-        self._results: dict = {}            # rpc_id → parsed result or exception
+        self._pending: dict = {}
+        self._results: dict = {}
         self._endpoint_event = threading.Event()
         self._stream_error: Optional[str] = None
-
-    # ── Transport detection ──
     def _detect_transport(self) -> str:
         low = self.url.lower()
-        if low.endswith("/sse") or "/sse?" in low:
-            return self.TRANSPORT_SSE
-        if low.endswith("/mcp") or "/mcp?" in low:
-            return self.TRANSPORT_STREAMABLE
-        # Default to Streamable-HTTP (newer spec). Callers can override via transport=.
+        if low.endswith("/sse") or "/sse?" in low: return self.TRANSPORT_SSE
+        if low.endswith("/mcp") or "/mcp?" in low: return self.TRANSPORT_STREAMABLE
         return self.TRANSPORT_STREAMABLE
-
     def _rpc_id(self) -> int:
         with self._lock:
             self._next_id += 1
             return self._next_id
-
-    # ═════════════════════════════════════════════════════════════════════
-    # Classic SSE transport: open GET stream, then POST to messages URL
-    # ═════════════════════════════════════════════════════════════════════
     def _ensure_sse_stream(self):
-        if self._sse_thread and self._sse_thread.is_alive() and self._messages_url:
-            return
-        if self._stream_error:
-            raise RuntimeError(self._stream_error)
-
+        if self._sse_thread and self._sse_thread.is_alive() and self._messages_url: return
+        if self._stream_error: raise RuntimeError(self._stream_error)
         get_headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
         get_headers["Accept"] = "text/event-stream"
-
         try:
             response = requests.get(self.url, headers=get_headers,
                                      stream=True, timeout=self.timeout)
-        except Exception as e:
-            raise RuntimeError(f"MCP SSE connect failed: {e}")
-        if response.status_code != 200:
-            raise RuntimeError(f"MCP SSE HTTP {response.status_code}: {response.text[:300]}")
-
+        except Exception as e: raise RuntimeError(f"MCP SSE connect failed: {e}")
+        if response.status_code != 200: raise RuntimeError(f"MCP SSE HTTP {response.status_code}: {response.text[:300]}")
         self._sse_response = response
         self._endpoint_event.clear()
-
         def pump():
             try:
                 self._pump_sse(response)
             except Exception as e:
                 self._stream_error = str(e)
                 self._endpoint_event.set()
-
         self._sse_thread = threading.Thread(target=pump, daemon=True)
         self._sse_thread.start()
-
-        # Wait up to 15s for endpoint event (tells us where to POST)
-        if not self._endpoint_event.wait(timeout=15):
-            raise RuntimeError("MCP SSE: no endpoint event received in 15s")
-        if not self._messages_url:
-            raise RuntimeError(f"MCP SSE: endpoint event missing URL ({self._stream_error or ''})")
-
+        if not self._endpoint_event.wait(timeout=15): raise RuntimeError("MCP SSE: no endpoint event received in 15s")
+        if not self._messages_url: raise RuntimeError(f"MCP SSE: endpoint event missing URL ({self._stream_error or ''})")
     def _pump_sse(self, response):
-        """Walk an SSE stream, dispatching events to waiting RPC callers."""
         event_name = "message"
         data_buf = []
-
-        # chunk_size=1 is required: the default buffers until ~8KB fills, which
-        # defeats real-time SSE delivery. Keep-alive comments then keep the
-        # endpoint event trapped for many seconds.
         for raw in response.iter_lines(chunk_size=1, decode_unicode=True):
-            if raw is None:
-                continue
+            if raw is None: continue
             if raw == "":
-                # End of event — dispatch
                 data_str = "\n".join(data_buf).strip()
                 data_buf = []
                 if not data_str:
                     event_name = "message"
                     continue
-
                 if event_name == "endpoint":
-                    # data: /messages/?session_id=xxx    (relative)
-                    # or    https://.../messages/...     (absolute)
                     ep = data_str
                     if ep.startswith("/"):
                         parsed = urlparse(self.url)
@@ -580,11 +407,9 @@ class _MCPClient:
                     elif ep.startswith("http"):
                         self._messages_url = ep
                     else:
-                        # Relative to current URL
                         base = self.url.rsplit("/", 1)[0]
                         self._messages_url = f"{base}/{ep}"
                     self._endpoint_event.set()
-
                 elif event_name in ("message", "") and data_str.startswith("{"):
                     try:
                         msg = json.loads(data_str)
@@ -595,21 +420,14 @@ class _MCPClient:
                     if mid is not None and mid in self._pending:
                         self._results[mid] = msg
                         self._pending[mid].set()
-
                 event_name = "message"
                 continue
-
-            if raw.startswith(":"):
-                # SSE comment / keepalive — ignore
-                continue
+            if raw.startswith(":"): continue
             if raw.startswith("event:"):
                 event_name = raw[6:].strip()
             elif raw.startswith("data:"):
                 data_buf.append(raw[5:].lstrip())
-            elif raw.startswith("id:") or raw.startswith("retry:"):
-                pass  # ignored
-            # Anything else is ignored
-
+            elif raw.startswith("id:") or raw.startswith("retry:"): pass
     def _rpc_via_sse(self, method: str, params: Optional[dict] = None,
                       is_notification: bool = False) -> dict:
         self._ensure_sse_stream()
@@ -619,28 +437,21 @@ class _MCPClient:
             payload["id"] = rid
         if params is not None:
             payload["params"] = params
-
         post_headers = dict(self.headers)
         post_headers["Content-Type"] = "application/json"
         post_headers.setdefault("Accept", "application/json, text/event-stream")
-
         if is_notification:
             try:
                 requests.post(self._messages_url, json=payload,
                               headers=post_headers, timeout=10)
-            except Exception:
-                pass
+            except Exception: pass
             return {}
-
         event = threading.Event()
         self._pending[rid] = event
         try:
             r = requests.post(self._messages_url, json=payload,
                               headers=post_headers, timeout=self.timeout)
-            if r.status_code not in (200, 202):
-                raise RuntimeError(f"MCP SSE POST HTTP {r.status_code}: {r.text[:300]}")
-            # Some implementations return the JSON-RPC result inline in the POST
-            # response; others only stream it back via the GET.
+            if r.status_code not in (200, 202): raise RuntimeError(f"MCP SSE POST HTTP {r.status_code}: {r.text[:300]}")
             if r.content:
                 ct = (r.headers.get("Content-Type") or "").lower()
                 if "application/json" in ct:
@@ -649,23 +460,14 @@ class _MCPClient:
                         if isinstance(msg, dict) and msg.get("id") == rid:
                             self._results[rid] = msg
                             event.set()
-                    except Exception:
-                        pass
-
-            if not event.wait(timeout=self.timeout):
-                raise RuntimeError(f"MCP SSE: no response for {method} within {self.timeout}s")
+                    except Exception: pass
+            if not event.wait(timeout=self.timeout): raise RuntimeError(f"MCP SSE: no response for {method} within {self.timeout}s")
             msg = self._results.pop(rid, None)
-            if msg is None:
-                raise RuntimeError(f"MCP SSE: empty result for {method}")
-            if "error" in msg:
-                raise RuntimeError(f"MCP error: {msg['error']}")
+            if msg is None: raise RuntimeError(f"MCP SSE: empty result for {method}")
+            if "error" in msg: raise RuntimeError(f"MCP error: {msg['error']}")
             return msg.get("result", {})
         finally:
             self._pending.pop(rid, None)
-
-    # ═════════════════════════════════════════════════════════════════════
-    # Streamable-HTTP transport
-    # ═════════════════════════════════════════════════════════════════════
     def _rpc_via_streamable(self, method: str, params: Optional[dict] = None,
                               is_notification: bool = False) -> dict:
         payload = {"jsonrpc": "2.0", "method": method}
@@ -673,120 +475,83 @@ class _MCPClient:
             payload["id"] = self._rpc_id()
         if params is not None:
             payload["params"] = params
-
         headers = dict(self.headers)
         headers["Content-Type"] = "application/json"
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
-
         try:
             r = requests.post(self.url, json=payload, headers=headers,
                                timeout=self.timeout, stream=True)
-        except Exception as e:
-            raise RuntimeError(f"MCP streamable transport error: {e}")
-
-        if is_notification:
-            return {}
-
+        except Exception as e: raise RuntimeError(f"MCP streamable transport error: {e}")
+        if is_notification: return {}
         if r.status_code == 404 and self._session_id:
-            # Session expired — one retry
             self._session_id = None
             self._initialized = False
             self.initialize()
             headers["Mcp-Session-Id"] = self._session_id or ""
             r = requests.post(self.url, json=payload, headers=headers,
                                timeout=self.timeout, stream=True)
-
-        if r.status_code >= 400:
-            raise RuntimeError(f"MCP HTTP {r.status_code}: {r.text[:500]}")
-
+        if r.status_code >= 400: raise RuntimeError(f"MCP HTTP {r.status_code}: {r.text[:500]}")
         new_sid = r.headers.get("Mcp-Session-Id") or r.headers.get("mcp-session-id")
         if new_sid:
             self._session_id = new_sid
-
         ct = (r.headers.get("Content-Type") or "").lower()
         want_id = payload["id"]
-        if "text/event-stream" in ct:
-            return self._parse_sse_inline(r, want_id)
+        if "text/event-stream" in ct: return self._parse_sse_inline(r, want_id)
         try:
             data = r.json()
-        except Exception:
-            raise RuntimeError(f"MCP: non-JSON response: {r.text[:300]}")
-        if "error" in data:
-            raise RuntimeError(f"MCP error: {data['error']}")
+        except Exception: raise RuntimeError(f"MCP: non-JSON response: {r.text[:300]}")
+        if "error" in data: raise RuntimeError(f"MCP error: {data['error']}")
         return data.get("result", {})
-
     def _parse_sse_inline(self, response, want_id: int) -> dict:
-        """Walk the SSE body of a Streamable-HTTP POST, pick the matching response."""
         data_buf = []
         for raw in response.iter_lines(chunk_size=1, decode_unicode=True):
-            if raw is None:
-                continue
+            if raw is None: continue
             if raw == "":
                 data_str = "\n".join(data_buf).strip()
                 data_buf = []
                 if data_str and data_str.startswith("{"):
                     try:
                         msg = json.loads(data_str)
-                    except Exception:
-                        continue
+                    except Exception: continue
                     if msg.get("id") == want_id:
-                        if "error" in msg:
-                            raise RuntimeError(f"MCP error: {msg['error']}")
+                        if "error" in msg: raise RuntimeError(f"MCP error: {msg['error']}")
                         return msg.get("result", {})
                 continue
             if raw.startswith("data:"):
                 data_buf.append(raw[5:].lstrip())
         raise RuntimeError("MCP streamable SSE ended without matching response")
-
-    # ═════════════════════════════════════════════════════════════════════
-    # Unified entry points
-    # ═════════════════════════════════════════════════════════════════════
     def _rpc(self, method: str, params: Optional[dict] = None,
               is_notification: bool = False) -> dict:
-        if self._transport == self.TRANSPORT_SSE:
-            return self._rpc_via_sse(method, params, is_notification)
+        if self._transport == self.TRANSPORT_SSE: return self._rpc_via_sse(method, params, is_notification)
         return self._rpc_via_streamable(method, params, is_notification)
-
     def initialize(self) -> dict:
-        """MCP handshake — cached per client."""
-        if self._initialized:
-            return {}
+        if self._initialized: return {}
         result = self._rpc("initialize", {
             "protocolVersion": "2025-06-18",
             "capabilities": {"sampling": {}, "roots": {"listChanged": False}},
             "clientInfo": {"name": "ibm-docgen-withimages", "version": "2.1"},
         })
-        # Required: send initialized notification (fire-and-forget)
         try:
             self._rpc("notifications/initialized", is_notification=True)
-        except Exception:
-            pass
+        except Exception: pass
         self._initialized = True
         return result
-
     def list_tools(self) -> list[dict]:
         self.initialize()
         result = self._rpc("tools/list")
         return result.get("tools", [])
-
     def call_tool(self, name: str, arguments: Optional[dict] = None) -> dict:
         self.initialize()
         return self._rpc("tools/call", {
             "name": name,
             "arguments": arguments or {},
         })
-
     def read_resource(self, uri: str) -> dict:
         self.initialize()
         return self._rpc("resources/read", {"uri": uri})
-
-
-# Cache: url → _MCPClient (one per server, reused across calls in this process)
 _MCP_CLIENTS: dict = {}
 _MCP_CLIENTS_LOCK = threading.Lock()
-
-
 def _get_mcp_client(url: str, headers: Optional[dict] = None,
                      transport: Optional[str] = None) -> _MCPClient:
     key = url.rstrip("/")
@@ -794,24 +559,8 @@ def _get_mcp_client(url: str, headers: Optional[dict] = None,
         if key not in _MCP_CLIENTS:
             _MCP_CLIENTS[key] = _MCPClient(url, headers=headers, transport=transport)
         return _MCP_CLIENTS[key]
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Tools
-# ═══════════════════════════════════════════════════════════════════════════
 class Tools:
-    """
-    Single-file IBM document generator.
-
-    Flow:
-      1. prepare_content_from_{knowledge|attachments|web_search}  → text + image candidates
-      2. assemble_document(session_id, format, title, sections)   → inline DOCX/PPTX
-
-    The model picks which images go in which sections, emitting a sections
-    array that references image IDs from step 1. This tool handles everything
-    else — extraction, embedding, rendering.
-    """
-
+    """Single-file IBM document generator."""
     class Valves(BaseModel):
         owui_base_url: str = Field(default="http://localhost:8080")
         google_api_key: str = Field(
@@ -887,34 +636,16 @@ class Tools:
             default=512,
             description="Longest-edge px for the thumbnail sent to the vision model. Smaller = cheaper/faster.",
         )
-
     def __init__(self):
         self.valves = self.Valves()
         self._logo_png_cache: Optional[bytes] = None
         self._phase: str = ""
         self._phase_started: float = 0.0
-        # Shared HTTP session with connection pool — reused across all image
-        # downloads in this tool instance. requests.Session keeps TCP / TLS
-        # connections alive, so a batch of image fetches from the same host
-        # (Wikimedia, Unsplash, CDN, etc.) reuses the socket instead of
-        # re-handshaking every time. Yields 2-5x speedup on parallel ingest.
-        # No retries — fail fast. With retry=1 and timeout=3s, a slow host costs
-        # 6s wall-clock. Without retry, 3s hard ceiling per URL. User wants speed
-        # over resilience here; if Wikimedia is slow, fall through to DDG/placeholder.
         from requests.adapters import HTTPAdapter
         self._http = requests.Session()
         _adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
         self._http.mount("http://", _adapter)
         self._http.mount("https://", _adapter)
-
-    # ── IBM logo (black) footer asset ─────────────────────────────────────
-    # Primary source: Wikipedia's IBM_logo.svg (the iconic 8-bar design).
-    # We pull a PNG raster and re-color it to pure black so it looks consistent
-    # on both white DOCX footers and any PPTX slide background.
-    #
-    # Fallback: an embedded base64 PNG rendered with Pillow's 8-bar glyph.
-    # Needed because upload.wikimedia.org rate-limits / 403s unauthenticated
-    # bot requests, AND because IBM Beta/Prod environments may be air-gapped.
     _LOGO_URL = (
         "https://upload.wikimedia.org/wikipedia/commons/thumb/5/51/"
         "IBM_logo.svg/600px-IBM_logo.svg.png"
@@ -937,12 +668,8 @@ class Tools:
         "AAgsAACBBQAgsAAAEFgAAAILAEBgAQAILAAABBYAgMACABBYAAAILAAAgQUAILAAABBYAACCBQDw1Gv+AwZFpM3uAIqvAAAAAElF"
         "TkSuQmCC"
     )
-
     def _get_ibm_logo_png(self) -> Optional[bytes]:
-        """Return the IBM logo PNG (cached). Wikipedia first, embedded fallback second."""
-        if self._logo_png_cache:
-            return self._logo_png_cache
-        # 1. Try Wikimedia (compliant UA — see https://meta.wikimedia.org/wiki/User-Agent_policy)
+        if self._logo_png_cache: return self._logo_png_cache
         try:
             r = requests.get(
                 self._LOGO_URL,
@@ -952,9 +679,6 @@ class Tools:
             if r.status_code == 200 and r.content:
                 raw = r.content
                 im = Image.open(io.BytesIO(raw)).convert("RGBA")
-                # Vectorized recolor: composite a solid-black image through the
-                # original alpha channel. One C-level call — ~200× faster than
-                # a nested per-pixel Python loop.
                 _, _, _, alpha = im.split()
                 black = Image.new("RGBA", im.size, (0, 0, 0, 255))
                 black.putalpha(alpha)
@@ -965,29 +689,19 @@ class Tools:
             print(f"[DocGen] IBM logo remote fetch HTTP {r.status_code}, using offline fallback")
         except Exception as e:
             print(f"[DocGen] IBM logo remote fetch failed: {e} — using offline fallback")
-        # 2. Fallback: decode the embedded base64 PNG (always works, no network needed).
         try:
             self._logo_png_cache = base64.b64decode(self._LOGO_FALLBACK_B64)
             return self._logo_png_cache
         except Exception as e:
             print(f"[DocGen] IBM logo fallback decode failed: {e}")
             return None
-
     def _get_ibm_logo_dims(self) -> tuple:
-        """Return (width, height) of the cached logo PNG, or a safe default."""
         png = self._get_ibm_logo_png()
-        if not png:
-            return (600, 240)
+        if not png: return (600, 240)
         try:
             im = Image.open(io.BytesIO(png))
             return im.size
-        except Exception:
-            return (600, 240)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # PUBLIC METHODS
-    # ══════════════════════════════════════════════════════════════════════
-
+        except Exception: return (600, 240)
     async def prepare_content_from_knowledge(
         self,
         query: str,
@@ -997,25 +711,15 @@ class Tools:
         __request__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Source mode: OWUI Knowledge Collection.
-
-        :param query: Search query to use for retrieval.
-        :param collection_id: OWUI knowledge collection ID.
-        :param max_images: Max image candidates to return (default 10).
-        """
+        """Source mode: OWUI Knowledge Collection."""
         try:
             await self._emit(__event_emitter__, "🔍 Retrieving from knowledge collection...")
             auth = self._auth_from_request(__request__)
-
             text_chunks = self._retrieve_text_from_collection(query, collection_id, auth)
             collection_files = self._list_collection_files(collection_id, auth)
             await self._emit(__event_emitter__,
                 f"📚 {len(text_chunks)} chunks · {len(collection_files)} files")
-
-            if not text_chunks and not collection_files:
-                return json.dumps({"error": "No content in collection", "text_chunks": [], "images": []})
-
+            if not text_chunks and not collection_files: return json.dumps({"error": "No content in collection", "text_chunks": [], "images": []})
             await self._emit(__event_emitter__, "🖼️ Extracting images...")
             all_images = self._extract_from_collection(text_chunks, collection_files, auth)
             all_images = await self._vision_rank_async(query, all_images, auth)
@@ -1023,12 +727,9 @@ class Tools:
             for i, img in enumerate(ranked):
                 img["display_id"] = f"IMG{i+1}"
                 _IMAGE_STORE.pin(img.get("id",""), f"IMG{i+1}")
-
             await self._emit(__event_emitter__, f"✨ {len(ranked)} images ready", done=True)
             return self._package(query, text_chunks, ranked, source="knowledge_collection")
-        except Exception:
-            return json.dumps({"error": traceback.format_exc(), "text_chunks": [], "images": []})
-
+        except Exception: return json.dumps({"error": traceback.format_exc(), "text_chunks": [], "images": []})
     async def prepare_content_from_notes(
         self,
         query: str,
@@ -1038,17 +739,7 @@ class Tools:
         __request__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Source mode: OWUI Notes. Reads the user's notes stored in OWUI
-        (note_ids whitelist or all notes owned by this user) and returns
-        text chunks suitable for assemble_document.
-
-        :param query: Topic/question — used to rank note excerpts for relevance.
-        :param note_ids: Optional list of specific note IDs. If omitted, the
-            tool pulls ALL notes owned by the current user.
-        :param max_chunks: Max text chunks to return (default 12).
-        """
-        _hb = None
+        """Source mode: OWUI Notes. Reads the user's notes stored in OWUI"""
         try:
             await self._emit(__event_emitter__, f"📝 Reading user notes for: {query[:60]}")
             _hb = self._start_heartbeat(__event_emitter__,
@@ -1056,9 +747,6 @@ class Tools:
                 initial_phase='📝 Reading notes')
             auth = self._auth_from_request(__request__)
             user_id = (__user__ or {}).get("id") or ""
-            # Read notes from OWUI DB directly (keyless — same DB OWUI is using).
-            # OWUI's /api/v1/notes requires the caller's JWT; hitting the DB
-            # sidesteps self-request deadlock and gives us richer text.
             text_chunks = self._read_owui_notes(user_id=user_id, note_ids=note_ids or None)
             if not text_chunks:
                 await self._stop_heartbeat(_hb)
@@ -1077,11 +765,8 @@ class Tools:
             except Exception: pass
             return json.dumps({"error": traceback.format_exc(),
                                "text_chunks": [], "images": []})
-
     def _read_owui_notes(self, user_id: str = "", note_ids: Optional[list] = None) -> list[dict]:
-        """Pull note rows from OWUI's SQLite directly. Returns text_chunks list."""
         import sqlite3 as _sql, os as _os, re as _re
-        # Auto-discover OWUI DB path via the running process
         db_path = None
         try:
             import subprocess
@@ -1091,13 +776,10 @@ class Tools:
             ).decode().strip()
             if out and _os.path.exists(out):
                 db_path = out
-        except Exception:
-            pass
+        except Exception: pass
         if not db_path:
-            # Fall back to the canonical path
             db_path = "/Users/pradeepbasavarajappa/.local/share/uv/tools/open-webui/lib/python3.12/site-packages/open_webui/data/webui.db"
-        if not _os.path.exists(db_path):
-            return []
+        if not _os.path.exists(db_path): return []
         try:
             con = _sql.connect(db_path, timeout=10)
             con.execute("PRAGMA busy_timeout=5000")
@@ -1120,10 +802,8 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] reading OWUI notes failed: {e}")
             return []
-
         chunks = []
         for nid, uid, title, data in rows:
-            # data is a JSON blob; body is often under data.content or data.text
             body = ""
             if isinstance(data, str):
                 try:
@@ -1132,12 +812,9 @@ class Tools:
                     parsed = {}
                 body = (parsed.get("content") or parsed.get("text") or parsed.get("body")
                         or (data if len(data) < 50000 else ""))
-            # Strip basic markdown/HTML noise
             body = re.sub(r"<[^>]+>", " ", str(body))
             body = re.sub(r"\s+", " ", body).strip()
-            if not body:
-                continue
-            # Split into ~2000-char chunks for ranking
+            if not body: continue
             for sub in self._chunk_text(body):
                 chunks.append({
                     "content": (f"{title}. {sub}" if title else sub),
@@ -1146,7 +823,6 @@ class Tools:
                     "page": 0, "doc_type": "note",
                 })
         return chunks
-
     async def prepare_content_from_folder(
         self,
         query: str,
@@ -1156,19 +832,9 @@ class Tools:
         __request__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Source mode: OWUI Folder. Pulls content from everything grouped under
-        an OWUI folder — chats (their assistant + user messages), any notes
-        referenced in folder.items, and any files referenced in folder.items.
-
-        :param query: Topic/question — used to rank excerpts for relevance.
-        :param folder_id: OWUI folder ID (required).
-        :param max_chunks: Max text chunks to return (default 12).
-        """
-        _hb = None
+        """Source mode: OWUI Folder. Pulls content from everything grouped under"""
         try:
-            if not folder_id:
-                return json.dumps({
+            if not folder_id: return json.dumps({
                     "error": "folder_id is required.",
                     "text_chunks": [], "images": [],
                 })
@@ -1195,15 +861,8 @@ class Tools:
             except Exception: pass
             return json.dumps({"error": traceback.format_exc(),
                                "text_chunks": [], "images": []})
-
     def _read_owui_folder(self, folder_id: str = "", user_id: str = "") -> list[dict]:
-        """Pull folder contents from OWUI SQLite. Reads:
-           - all chats with chat.folder_id = folder_id (messages extracted)
-           - any note_ids / file_ids referenced in folder.items or folder.data
-        Returns a flat list of text chunks.
-        """
         import sqlite3 as _sql, os as _os
-        # Auto-discover OWUI DB (same pattern as _read_owui_notes).
         db_path = None
         try:
             import subprocess
@@ -1213,19 +872,14 @@ class Tools:
             ).decode().strip()
             if out and _os.path.exists(out):
                 db_path = out
-        except Exception:
-            pass
+        except Exception: pass
         if not db_path:
             db_path = "/Users/pradeepbasavarajappa/.local/share/uv/tools/open-webui/lib/python3.12/site-packages/open_webui/data/webui.db"
-        if not _os.path.exists(db_path):
-            return []
-
+        if not _os.path.exists(db_path): return []
         chunks: list[dict] = []
         try:
             con = _sql.connect(db_path, timeout=10)
             con.execute("PRAGMA busy_timeout=5000")
-
-            # 1) Metadata: folder name + referenced item IDs
             folder_name = ""
             ref_note_ids: list[str] = []
             ref_file_ids: list[str] = []
@@ -1245,8 +899,7 @@ class Tools:
             if row:
                 folder_name = row[0] or ""
                 for blob in (row[1], row[2]):
-                    if not blob:
-                        continue
+                    if not blob: continue
                     try:
                         parsed = json.loads(blob) if isinstance(blob, str) else blob
                     except Exception:
@@ -1259,7 +912,6 @@ class Tools:
                             if isinstance(fid, str):
                                 ref_file_ids.append(fid)
                     elif isinstance(parsed, list):
-                        # items list: [{type:"note"|"file", id:"..."}, ...]
                         for entry in parsed:
                             if isinstance(entry, dict):
                                 t = (entry.get("type") or "").lower()
@@ -1268,8 +920,6 @@ class Tools:
                                     ref_note_ids.append(eid)
                                 elif t == "file" and eid:
                                     ref_file_ids.append(eid)
-
-            # 2) Chats under this folder
             try:
                 chat_rows = con.execute(
                     "SELECT id, title, chat FROM chat WHERE folder_id=? ORDER BY updated_at DESC LIMIT 50",
@@ -1289,19 +939,16 @@ class Tools:
                         messages = list(messages.values())
                 body_parts: list[str] = []
                 for m in messages or []:
-                    if not isinstance(m, dict):
-                        continue
+                    if not isinstance(m, dict): continue
                     role = m.get("role") or ""
                     content = m.get("content") or ""
                     if isinstance(content, list):
-                        # OWUI sometimes stores content as [{type:"text", text:"..."}]
                         texts = [c.get("text", "") for c in content if isinstance(c, dict)]
                         content = " ".join(t for t in texts if t)
                     if isinstance(content, str) and content.strip():
                         body_parts.append(f"[{role}] {content.strip()}")
                 body = re.sub(r"\s+", " ", " ".join(body_parts)).strip()
-                if not body:
-                    continue
+                if not body: continue
                 for sub in self._chunk_text(body):
                     chunks.append({
                         "content": (f"{ctitle}. {sub}" if ctitle else sub),
@@ -1309,16 +956,11 @@ class Tools:
                         "url": f"#chat/{cid}",
                         "page": 0, "doc_type": "chat",
                     })
-
-            # 3) Referenced notes
             if ref_note_ids:
                 try:
                     note_chunks = self._read_owui_notes(user_id=user_id, note_ids=ref_note_ids)
                     chunks.extend(note_chunks)
-                except Exception:
-                    pass
-
-            # 4) Referenced files — read plain text via OWUI's file path column
+                except Exception: pass
             if ref_file_ids:
                 placeholders = ",".join(["?"] * len(ref_file_ids))
                 try:
@@ -1335,11 +977,9 @@ class Tools:
                             parsed = json.loads(fdata) if isinstance(fdata, str) else fdata
                             if isinstance(parsed, dict):
                                 body = parsed.get("content") or parsed.get("text") or ""
-                        except Exception:
-                            pass
+                        except Exception: pass
                     if not body and fpath and _os.path.exists(fpath):
                         try:
-                            # Only read small text-like files directly
                             if _os.path.getsize(fpath) < 2_000_000:
                                 with open(fpath, "rb") as fh:
                                     raw = fh.read()
@@ -1347,11 +987,9 @@ class Tools:
                                     body = raw.decode("utf-8", errors="ignore")
                                 except Exception:
                                     body = ""
-                        except Exception:
-                            pass
+                        except Exception: pass
                     body = re.sub(r"\s+", " ", str(body)).strip()
-                    if not body:
-                        continue
+                    if not body: continue
                     for sub in self._chunk_text(body):
                         chunks.append({
                             "content": (f"{fname}. {sub}" if fname else sub),
@@ -1359,17 +997,13 @@ class Tools:
                             "url": f"#file/{fid}",
                             "page": 0, "doc_type": "file",
                         })
-
             con.close()
         except Exception as e:
             print(f"[DocGen] reading OWUI folder failed: {e}")
-
-        # Prefix chunks with folder name for traceability
         if folder_name and chunks:
             for c in chunks:
                 c["content"] = f"[Folder: {folder_name}] {c['content']}"
         return chunks
-
     async def prepare_content_from_attachments(
         self,
         query: str,
@@ -1380,17 +1014,8 @@ class Tools:
         __files__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Source mode: Chat Attachments.
-
-        :param query: Topic/question — used to rank images for relevance.
-        :param attachment_file_ids: OWUI file IDs for files attached to this chat.
-            If omitted, auto-detected from the chat's attached files.
-        :param max_images: Max image candidates to return.
-        """
-        _hb = None
+        """Source mode: Chat Attachments."""
         try:
-            # Auto-detect OWUI-injected attachments when caller did not pass IDs.
             if not attachment_file_ids and __files__:
                 auto_ids = []
                 for f in __files__:
@@ -1399,21 +1024,17 @@ class Tools:
                         if fid:
                             auto_ids.append(fid)
                 attachment_file_ids = auto_ids
-            if not attachment_file_ids:
-                return json.dumps({
+            if not attachment_file_ids: return json.dumps({
                     "error": "No attachment_file_ids provided and no files attached to chat.",
                     "text_chunks": [], "images": []
                 })
             await self._emit(__event_emitter__, f"📎 Processing {len(attachment_file_ids)} attachment(s)...")
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_attachments'), initial_phase='📎 Extracting from attachments')
             auth = self._auth_from_request(__request__)
-
-            # Text only — image extraction removed per user policy v5.
             text_chunks, _unused_imgs = await asyncio.to_thread(
                 self._extract_attachments_parallel, attachment_file_ids, auth, 4
             )
             text_chunks = self._rank_text(query, text_chunks)[:self.valves.max_text_chunks]
-
             await self._emit(__event_emitter__, f"📚 {len(text_chunks)} text chunks ready", done=True)
             await self._stop_heartbeat(_hb)
             return self._package(query, text_chunks, [], source="chat_attachments")
@@ -1421,7 +1042,6 @@ class Tools:
             try: await self._stop_heartbeat(_hb)
             except Exception: pass
             return json.dumps({"error": traceback.format_exc(), "text_chunks": [], "images": []})
-
     async def prepare_content_from_web_search(
         self,
         query: str,
@@ -1431,18 +1051,10 @@ class Tools:
         __request__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Source mode: Web Search (Google Programmable Search).
-
-        :param query: Search query.
-        :param num_text_results: Text results to include (1–10).
-        :param num_image_results: Image results to download (1–10).
-        """
-        _hb = None
+        """Source mode: Web Search (Google Programmable Search)."""
         try:
             await self._emit(__event_emitter__, f"🌐 Searching: {query}")
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_web_search'), initial_phase='🌐 Searching the web')
-            # Text only — image logic removed per user policy v5.
             text_chunks = self._web_search_text(query, num_text_results)
             await self._emit(__event_emitter__, f"📚 {len(text_chunks)} web results", done=True)
             await self._stop_heartbeat(_hb)
@@ -1451,7 +1063,6 @@ class Tools:
             try: await self._stop_heartbeat(_hb)
             except Exception: pass
             return json.dumps({"error": traceback.format_exc(), "text_chunks": [], "images": []})
-
     async def list_mcp_tools(
         self,
         server_id: Optional[str] = None,
@@ -1459,16 +1070,10 @@ class Tools:
         __request__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        List tools advertised by configured MCP servers (ICA Context Forge, etc.).
-        Use this to discover what an MCP server can do before calling it.
-
-        :param server_id: Optional — if provided, list only that server's tools. Else list all configured.
-        """
+        """List tools advertised by configured MCP servers (ICA Context Forge, etc.)."""
         try:
             servers = self._load_mcp_servers(__request__)
-            if not servers:
-                return json.dumps({
+            if not servers: return json.dumps({
                     "error": (
                         "No MCP servers discovered. In ICA/OWUI, ask your admin to add the "
                         "MCP server under Admin Settings → External Tools (it will then be auto-detected). "
@@ -1476,11 +1081,9 @@ class Tools:
                     ),
                     "servers": [],
                 })
-
             out = []
             for srv in servers:
-                if server_id and srv["id"] != server_id:
-                    continue
+                if server_id and srv["id"] != server_id: continue
                 await self._emit(__event_emitter__, f"🔌 Listing tools on {srv['name']}...")
                 try:
                     client = _get_mcp_client(srv["url"], headers=self._mcp_headers(srv),
@@ -1513,12 +1116,9 @@ class Tools:
                         "server_name": srv["name"],
                         "error": str(e),
                     })
-
             await self._emit(__event_emitter__, "✅ MCP tool listing complete", done=True)
             return json.dumps({"servers": out}, indent=2)
-        except Exception:
-            return json.dumps({"error": traceback.format_exc(), "servers": []})
-
+        except Exception: return json.dumps({"error": traceback.format_exc(), "servers": []})
     async def prepare_content_from_mcp(
         self,
         query: str,
@@ -1529,47 +1129,26 @@ class Tools:
         __user__: Optional[dict] = None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Source mode: MCP server (ICA Context Forge or any Streamable-HTTP MCP).
-        Calls one tool on one MCP server, parses its result into text_chunks and images,
-        then returns a package in the same shape as the other prepare_content_* methods.
-
-        Works with:
-          - Plain MCP tools that return text / images / resources in content[]
-          - "MCP Apps" tools that declare _meta.ui.resourceUri → we fetch and extract from that UI HTML
-
-        :param query: What the user is asking — used for image ranking.
-        :param server_id: ID of a configured MCP server (from mcp_servers_json valve).
-        :param tool_name: Name of the tool to call on that server.
-        :param tool_arguments: Arguments to pass to the tool (schema is server-specific).
-        :param max_images: Max image candidates to include.
-        """
+        """Source mode: MCP server (ICA Context Forge or any Streamable-HTTP MCP)."""
         try:
             await self._emit(__event_emitter__, f"🔌 Calling {server_id}.{tool_name}...")
             servers = {s["id"]: s for s in self._load_mcp_servers()}
-            if server_id not in servers:
-                return json.dumps({
+            if server_id not in servers: return json.dumps({
                     "error": f"MCP server '{server_id}' not configured.",
                     "available_server_ids": list(servers.keys()),
                     "text_chunks": [], "images": [],
                 })
-
             srv = servers[server_id]
             client = _get_mcp_client(srv["url"], headers=self._mcp_headers(srv),
                                       transport=srv.get("transport"))
-
-            # Fetch tool definitions once to detect UI Apps metadata
             tool_def = None
             try:
                 all_tools = client.list_tools()
                 tool_def = next((t for t in all_tools if t.get("name") == tool_name), None)
             except Exception as e:
                 print(f"[MCP] tools/list failed on {server_id}: {e}")
-
-            # Call the tool
             result = client.call_tool(tool_name, tool_arguments or {})
             await self._emit(__event_emitter__, "📦 Parsing MCP result...")
-
             src_meta = {
                 "source": f"mcp://{server_id}/{tool_name}",
                 "ext": ".mcp",
@@ -1577,7 +1156,6 @@ class Tools:
                 "mcp_server_id": server_id,
                 "mcp_tool_name": tool_name,
             }
-
             text_chunks, all_images = self._parse_mcp_result(
                 result=result,
                 tool_def=tool_def,
@@ -1585,12 +1163,8 @@ class Tools:
                 src_meta=src_meta,
                 query=query,
             )
-
             await self._emit(__event_emitter__,
                 f"📚 {len(text_chunks)} text chunks · {len(all_images)} raw images")
-
-            # If an MCP App UI resource was declared but not embedded in the result,
-            # fetch it and extract images from its HTML too
             if tool_def and not all_images:
                 ui_uri = (tool_def.get("_meta") or {}).get("ui", {}).get("resourceUri")
                 if ui_uri:
@@ -1604,20 +1178,16 @@ class Tools:
                         all_images.extend(extra_img)
                     except Exception as e:
                         print(f"[MCP] UI resource fetch failed: {e}")
-
             ranked = self._rank_images(query, all_images)[:max_images]
             for i, img in enumerate(ranked):
                 img["display_id"] = f"IMG{i+1}"
                 _IMAGE_STORE.pin(img.get("id",""), f"IMG{i+1}")
             text_chunks = self._rank_text(query, text_chunks)[:self.valves.max_text_chunks]
-
             await self._emit(__event_emitter__,
                 f"✨ {len(ranked)} images from MCP ready", done=True)
             return self._package(query, text_chunks, ranked, source=f"mcp:{server_id}/{tool_name}")
-        except Exception:
-            return json.dumps({"error": traceback.format_exc(),
+        except Exception: return json.dumps({"error": traceback.format_exc(),
                                "text_chunks": [], "images": []})
-
     async def prepare_content_mixed(
         self,
         query: str,
@@ -1630,30 +1200,17 @@ class Tools:
         __request__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Source mode: mix multiple sources in one call. Merges results so sections can draw
-        on text and images from any combination of knowledge, attachments, MCP calls, and web.
-
-        :param query: Topic / question.
-        :param knowledge_collection_id: Optional OWUI knowledge collection ID.
-        :param attachment_file_ids: Optional list of chat-attached file IDs.
-        :param mcp_calls: Optional list of {"server_id": "...", "tool_name": "...", "arguments": {...}}.
-        :param web_search: If True, also run a Google search (requires google_api_key/cx in valves).
-        :param max_images: Total image candidates in final output.
-        """
-        _hb = None
+        """Source mode: mix multiple sources in one call. Merges results so sections can draw"""
         try:
             auth = self._auth_from_request(__request__)
             all_text, all_images = [], []
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_smart'), initial_phase='📥 Gathering content from all sources')
-
             if knowledge_collection_id:
                 await self._emit(__event_emitter__, "🔍 Knowledge collection...")
                 tc = self._retrieve_text_from_collection(query, knowledge_collection_id, auth)
                 cf = self._list_collection_files(knowledge_collection_id, auth)
                 all_text.extend(tc)
                 all_images.extend(self._extract_from_collection(tc, cf, auth))
-
             if attachment_file_ids:
                 await self._emit(__event_emitter__, f"📎 {len(attachment_file_ids)} attachment(s)...")
                 tc, ti = await asyncio.to_thread(
@@ -1661,15 +1218,13 @@ class Tools:
                 )
                 all_text.extend(tc)
                 all_images.extend(ti)
-
             if mcp_calls:
                 servers = {s["id"]: s for s in self._load_mcp_servers()}
                 for call in mcp_calls:
                     sid = call.get("server_id")
                     tname = call.get("tool_name")
                     args = call.get("arguments", {})
-                    if sid not in servers:
-                        continue
+                    if sid not in servers: continue
                     await self._emit(__event_emitter__, f"🔌 MCP {sid}.{tname}...")
                     srv = servers[sid]
                     try:
@@ -1679,8 +1234,7 @@ class Tools:
                         try:
                             all_tools = client.list_tools()
                             tool_def = next((t for t in all_tools if t.get("name") == tname), None)
-                        except Exception:
-                            pass
+                        except Exception: pass
                         result = client.call_tool(tname, args or {})
                         src_meta = {
                             "source": f"mcp://{sid}/{tname}",
@@ -1692,12 +1246,9 @@ class Tools:
                         all_images.extend(ti)
                     except Exception as e:
                         print(f"[MCP mixed] {sid}.{tname} failed: {e}")
-
             if web_search:
                 await self._emit(__event_emitter__, "🌐 Web search (text only)...")
                 all_text.extend(self._web_search_text(query, 6))
-                # Image fetching removed per user policy v5.
-
             if self.valves.vision_rank_enabled and all_images:
                 await self._emit(__event_emitter__, f"👁️ Vision-ranking {min(len(all_images), self.valves.vision_rank_max_images)} images...")
                 all_images = await self._vision_rank_async(query, all_images, auth)
@@ -1706,7 +1257,6 @@ class Tools:
                 img["display_id"] = f"IMG{i+1}"
                 _IMAGE_STORE.pin(img.get("id",""), f"IMG{i+1}")
             text_chunks = self._rank_text(query, all_text)[:self.valves.max_text_chunks]
-
             await self._emit(__event_emitter__,
                 f"✨ Mixed mode: {len(text_chunks)} chunks, {len(ranked)} images", done=True)
             await self._stop_heartbeat(_hb)
@@ -1716,7 +1266,6 @@ class Tools:
             except Exception: pass
             return json.dumps({"error": traceback.format_exc(),
                                "text_chunks": [], "images": []})
-
     async def prepare_content_auto(
         self,
         query: str,
@@ -1726,61 +1275,38 @@ class Tools:
         __user__: Optional[dict] = None,
         __event_emitter__=None,
     ) -> str:
-        """
-        Auto-routing MCP mode: the tool itself picks which MCP tools to call.
-
-        Use this when you want content from MCP servers but don't want to
-        specify tool_name/arguments yourself. The tool:
-          1. Lists all tools on every configured MCP server (cached 10 min)
-          2. Ranks each tool against the query (name + description + schema match)
-          3. Invokes the top N tools with heuristically-derived arguments
-          4. Parses every result into the usual {text_chunks, images} package
-
-        :param query: User's question / topic — drives tool ranking and arg-filling.
-        :param preferred_servers: Optional list of server IDs to restrict to.
-        :param max_tools_to_call: How many top-ranked tools to actually invoke.
-        :param max_images: Total image candidates returned.
-        """
+        """Auto-routing MCP mode: the tool itself picks which MCP tools to call."""
         try:
             await self._emit(__event_emitter__, "🧭 Discovering MCP tools...")
             servers = self._load_mcp_servers()
             if preferred_servers:
                 servers = [s for s in servers if s["id"] in preferred_servers]
-            if not servers:
-                return json.dumps({
+            if not servers: return json.dumps({
                     "error": "No MCP servers configured (or none match preferred_servers).",
                     "text_chunks": [], "images": [],
                 })
-
             catalog = self._discover_mcp_catalog(servers, __event_emitter__)
-            if not catalog:
-                return json.dumps({
+            if not catalog: return json.dumps({
                     "error": "Could not discover tools on any configured MCP server.",
                     "text_chunks": [], "images": [],
                 })
-
             await self._emit(__event_emitter__,
                 f"🧮 Ranking {len(catalog)} tools against the query...")
             ranked_tools = self._rank_mcp_tools(query, catalog)[:max_tools_to_call]
-            if not ranked_tools:
-                return json.dumps({
+            if not ranked_tools: return json.dumps({
                     "error": "No MCP tools scored above the relevance floor for this query.",
                     "text_chunks": [], "images": [],
                 })
-
             picks = [f"{t['server_id']}.{t['name']} ({t['_score']:.2f})" for t in ranked_tools]
             await self._emit(__event_emitter__, f"🎯 Picked: {', '.join(picks)}")
-
             all_text: list[dict] = []
             all_images: list[dict] = []
             invocation_log: list[dict] = []
             servers_by_id = {s["id"]: s for s in servers}
-
             for t in ranked_tools:
                 sid = t["server_id"]
                 srv = servers_by_id.get(sid)
-                if not srv:
-                    continue
+                if not srv: continue
                 args = self._auto_fill_tool_args(query, t.get("inputSchema") or {})
                 await self._emit(__event_emitter__,
                     f"🔌 Calling {sid}.{t['name']} {args or '{}'}...")
@@ -1806,25 +1332,20 @@ class Tools:
                         "server_id": sid, "tool_name": t["name"],
                         "arguments": args, "error": str(e)[:300],
                     })
-
             ranked_imgs = self._rank_images(query, all_images)[:max_images]
             for i, img in enumerate(ranked_imgs):
                 img["display_id"] = f"IMG{i+1}"
                 _IMAGE_STORE.pin(img.get("id",""), f"IMG{i+1}")
             text_chunks = self._rank_text(query, all_text)[:self.valves.max_text_chunks]
-
             await self._emit(__event_emitter__,
                 f"✨ Auto-route: {len(text_chunks)} chunks, {len(ranked_imgs)} images from "
                 f"{len([e for e in invocation_log if 'error' not in e])}/{len(invocation_log)} tools",
                 done=True)
-
             pkg = json.loads(self._package(query, text_chunks, ranked_imgs, source="mcp_auto"))
             pkg["mcp_invocations"] = invocation_log
             return json.dumps(pkg, indent=2)
-        except Exception:
-            return json.dumps({"error": traceback.format_exc(),
+        except Exception: return json.dumps({"error": traceback.format_exc(),
                                "text_chunks": [], "images": []})
-
     async def prepare_content_smart(
         self,
         query: str,
@@ -1842,36 +1363,13 @@ class Tools:
         __files__=None,
         __event_emitter__=None,
     ) -> str:
-        """
-        One-call "do the right thing" mode. Tool figures out where to pull from:
-          - Attachments (if file IDs given, OR auto-detected from chat)
-          - Knowledge collection (if ID given)
-          - OWUI Notes (all user's notes, unless use_notes=False)
-          - MCP auto-routing (tries all configured MCP servers, picks best tools)
-          - Web search (if enabled)
-
-        This is the method to use when the user's intent is clear but you don't
-        want to micromanage which source answers it.
-
-        :param query: User's question / topic.
-        :param knowledge_collection_id: Optional OWUI knowledge collection.
-        :param attachment_file_ids: Optional chat-attached file IDs.
-        :param note_ids: Optional OWUI note IDs (defaults to all user's notes).
-        :param folder_id: Optional OWUI folder ID (pulls chats + notes + files under it).
-        :param use_mcp_auto: If True (default), auto-route to MCP tools.
-        :param use_web_search: If True, also run Google search.
-        :param max_mcp_tools: Max number of MCP tools to invoke.
-        :param max_images: Total image candidates.
-        """
-        _hb = None
+        """One-call "do the right thing" mode. Tool figures out where to pull from:"""
         try:
             auth = self._auth_from_request(__request__)
             all_text: list[dict] = []
             all_images: list[dict] = []
             source_log: list[str] = []
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_smart'), initial_phase='📥 Gathering content from all sources')
-
-            # Auto-detect chat attachments from OWUI-injected __files__.
             if not attachment_file_ids and __files__:
                 auto_ids = []
                 for f in __files__:
@@ -1883,7 +1381,6 @@ class Tools:
                     attachment_file_ids = auto_ids
                     await self._emit(__event_emitter__,
                         f"📎 Auto-detected {len(auto_ids)} chat attachment(s)")
-
             if knowledge_collection_id:
                 await self._emit(__event_emitter__, "🔍 Knowledge collection...")
                 tc = self._retrieve_text_from_collection(query, knowledge_collection_id, auth)
@@ -1891,7 +1388,6 @@ class Tools:
                 all_text.extend(tc)
                 all_images.extend(self._extract_from_collection(tc, cf, auth))
                 source_log.append(f"knowledge:{knowledge_collection_id}")
-
             if attachment_file_ids:
                 await self._emit(__event_emitter__, f"📎 {len(attachment_file_ids)} attachment(s)...")
                 tc, ti = await asyncio.to_thread(
@@ -1900,9 +1396,6 @@ class Tools:
                 all_text.extend(tc)
                 all_images.extend(ti)
                 source_log.append(f"attachments:{len(attachment_file_ids)}")
-
-            # OWUI Notes — auto-pull when use_notes=True (default) OR caller passed note_ids.
-            # Reads directly from OWUI's SQLite for speed (no self-HTTP).
             if use_notes or note_ids:
                 user_id = (__user__ or {}).get("id") or ""
                 note_chunks = self._read_owui_notes(user_id=user_id, note_ids=note_ids or None)
@@ -1911,8 +1404,6 @@ class Tools:
                         f"📝 Pulled {len(note_chunks)} note chunks")
                     all_text.extend(note_chunks)
                     source_log.append(f"notes:{len(note_chunks)}")
-
-            # OWUI Folder — pulls chats + notes + files grouped under a folder.
             if folder_id:
                 user_id = (__user__ or {}).get("id") or ""
                 folder_chunks = self._read_owui_folder(folder_id=folder_id, user_id=user_id)
@@ -1921,7 +1412,6 @@ class Tools:
                         f"📁 Pulled {len(folder_chunks)} folder chunks")
                     all_text.extend(folder_chunks)
                     source_log.append(f"folder:{folder_id}:{len(folder_chunks)}")
-
             if use_mcp_auto:
                 servers = self._load_mcp_servers()
                 if servers:
@@ -1953,25 +1443,17 @@ class Tools:
                                 source_log.append(f"mcp:{t['server_id']}.{t['name']}")
                             except Exception as e:
                                 print(f"[smart] {t['server_id']}.{t['name']} failed: {e}")
-
-            # Auto-fallback: if no content from any other source, use web search.
-            # Text only — image logic removed per user policy v5.
             web_only_images = False
             if use_web_search or (not all_text and not all_images):
                 await self._emit(__event_emitter__, "🌐 Web search (text only)...")
                 web_texts = await asyncio.to_thread(self._web_search_text, query, 6)
                 all_text.extend(web_texts)
                 source_log.append("web_search")
-
-            if not all_text and not all_images:
-                return json.dumps({
+            if not all_text and not all_images: return json.dumps({
                     "error": "No content retrieved from any source.",
                     "sources_tried": source_log,
                     "text_chunks": [], "images": [],
                 })
-
-            # Vision-rank ONLY when images came from attachments/knowledge/MCP.
-            # Web results are already targeted to the query — trust the search.
             if (self.valves.vision_rank_enabled and all_images
                     and not (web_only_images and self.valves.skip_vision_rank_for_web)):
                 await self._emit(__event_emitter__,
@@ -1979,17 +1461,14 @@ class Tools:
                 all_images = await self._vision_rank_async(query, all_images, auth)
             elif web_only_images:
                 await self._emit(__event_emitter__, "⚡ Skipping vision-rank (web-only results)")
-
             ranked_imgs = self._rank_images(query, all_images)[:max_images]
             for i, img in enumerate(ranked_imgs):
                 img["display_id"] = f"IMG{i+1}"
                 _IMAGE_STORE.pin(img.get("id",""), f"IMG{i+1}")
             text_chunks = self._rank_text(query, all_text)[:self.valves.max_text_chunks]
-
             await self._emit(__event_emitter__,
                 f"✨ Smart: {len(text_chunks)} chunks, {len(ranked_imgs)} images "
                 f"from {len(source_log)} sources", done=True)
-
             pkg = json.loads(self._package(query, text_chunks, ranked_imgs, source="smart"))
             pkg["sources_used"] = source_log
             await self._stop_heartbeat(_hb)
@@ -1999,7 +1478,6 @@ class Tools:
             except Exception: pass
             return json.dumps({"error": traceback.format_exc(),
                                "text_chunks": [], "images": []})
-
     async def assemble_document(
         self,
         session_id: str,
@@ -2011,61 +1489,14 @@ class Tools:
         __user__: Optional[dict] = None,
         __event_emitter__=None,
     ):
-        """
-        Build and render the final DOCX, PPTX or XLSX inline in chat.
-
-        sections_json must be a JSON array of section objects:
-        [
-          {
-            "title": "01  Executive Summary",
-            "paragraphs": ["...", "..."],
-            "bullets": ["...", "..."],
-            "table": { "headers": ["A","B"], "rows": [["x","y"]] } | null,
-            "image_id": "IMG1" | null,
-            "image_caption": "Figure — ..." | null,
-            "speaker_notes": "..." | null
-          }
-        ]
-
-        For format="xlsx" you may ALSO pass workbook_json — a JSON object
-        describing explicit sheets. If omitted, sheets are derived from
-        sections_json (one sheet per section plus a Summary sheet).
-
-        workbook_json shape:
-          {
-            "sheets": [
-              {
-                "title": "Sheet name",
-                "headers": ["Col A", "Col B"],
-                "rows": [["v1","v2"], ["v3","v4"]],
-                "notes": "Optional one-line note"
-              }
-            ]
-          }
-
-        :param session_id: Unique ID for this document build.
-        :param format: "docx", "pptx" or "xlsx".
-        :param title: Document title (used for filename and cover).
-        :param client_name: Client/audience name for header/cover.
-        :param sections_json: JSON array of section objects (see above).
-        :param workbook_json: Optional JSON workbook spec (xlsx only).
-        """
-        _hb = None
+        """Build and render the final DOCX, PPTX or XLSX inline in chat."""
         try:
             await self._emit(__event_emitter__, f"📝 Assembling {format.upper()}...")
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('assemble_document'), initial_phase='📝 Assembling document')
-
             try:
                 sections = json.loads(sections_json) if isinstance(sections_json, str) else sections_json
-            except json.JSONDecodeError as e:
-                return f"❌ sections_json is not valid JSON: {e}"
-
-            if not isinstance(sections, list) or not sections:
-                return "❌ sections_json must be a non-empty array"
-
-            # HARD CAP on section count per format (user policy v9).
-            # Truncate silently so the LLM doesn't waste tokens on extra sections
-            # that would be dropped; emit an info status so user knows.
+            except json.JSONDecodeError as e: return f"❌ sections_json is not valid JSON: {e}"
+            if not isinstance(sections, list) or not sections: return "❌ sections_json must be a non-empty array"
             original_count = len(sections)
             if format == "pptx" and original_count > self.MAX_SLIDES_PPTX:
                 sections = sections[: self.MAX_SLIDES_PPTX]
@@ -2077,15 +1508,10 @@ class Tools:
                 await self._emit(__event_emitter__,
                     f"⚠️ DOCX capped at {self.MAX_PAGES_DOCX} content pages "
                     f"(was {original_count}). Showing first {self.MAX_PAGES_DOCX}.")
-
-            # Resolve image_ids to actual bytes from the store.
-            # Accepts either the opaque store id or the display_id (e.g. "IMG1").
             resolved_sections = []
             missing_images = []
             for s in sections:
                 resolved = dict(s)
-                # SVG-first: if the section carries raw SVG for a diagram/chart,
-                # rasterize it and treat the result as the embedded image.
                 svg_str = s.get("svg")
                 if svg_str and not resolved.get("_img_bytes"):
                     png = _svg_to_png_bytes(svg_str, output_width=1600)
@@ -2101,7 +1527,6 @@ class Tools:
                     img_bytes = _IMAGE_STORE.get_bytes(s["image_id"])
                     img_meta = _IMAGE_STORE.get_metadata(s["image_id"])
                     if not img_bytes:
-                        # Fallback: the LLM may have used display_id ("IMG1") instead of store key
                         img_bytes, img_meta = _IMAGE_STORE.get_by_display_id(s["image_id"])
                     if img_bytes and img_meta:
                         resolved["_img_bytes"] = img_bytes
@@ -2111,14 +1536,9 @@ class Tools:
                     else:
                         missing_images.append(s["image_id"])
                 resolved_sections.append(resolved)
-
             if missing_images:
                 await self._emit(__event_emitter__,
                     f"⚠️ {len(missing_images)} image(s) expired/missing — continuing without them")
-
-            # Strip WEB-image references only (image_id, svg, image_hint); keep
-            # chart_type + chart_data because those drive native OOXML chart
-            # parts built from table data — no network, no external renderer.
             stripped = []
             for s in resolved_sections:
                 if isinstance(s, dict):
@@ -2130,17 +1550,9 @@ class Tools:
                 else:
                     stripped.append(s)
             resolved_sections = stripped
-
-            # Auto-inject chart specs for sections with numeric tables.
-            # Builders emit these as NATIVE OOXML chart parts (c:chartSpace) —
-            # no external charting library, no PNG rasterization. HTML preview uses inline SVG.
             if format in ("docx", "pptx", "xlsx"):
                 resolved_sections = self._autoinject_charts(resolved_sections)
-
-            # Enforce content caps per format:
-            #   PPTX: 100 words/slide, DOCX: 500 words/page, XLSX: 50 rows/sheet
             resolved_sections = self._enforce_content_caps(resolved_sections, format)
-
             if format == "docx":
                 html_response = self._build_and_render_docx(
                     session_id, title, client_name, resolved_sections, __event_emitter__
@@ -2150,8 +1562,7 @@ class Tools:
                 if workbook_json:
                     try:
                         wb_spec = json.loads(workbook_json) if isinstance(workbook_json, str) else workbook_json
-                    except json.JSONDecodeError as e:
-                        return f"❌ workbook_json is not valid JSON: {e}"
+                    except json.JSONDecodeError as e: return f"❌ workbook_json is not valid JSON: {e}"
                 html_response = self._build_and_render_xlsx(
                     session_id, title, client_name, resolved_sections, wb_spec, __event_emitter__
                 )
@@ -2159,525 +1570,24 @@ class Tools:
                 html_response = self._build_and_render_pptx(
                     session_id, title, client_name, resolved_sections, __event_emitter__
                 )
-
             await self._emit(__event_emitter__, f"✅ {format.upper()} ready", done=True)
             await self._stop_heartbeat(_hb)
             return html_response
-
         except Exception:
             try: await self._stop_heartbeat(_hb)
             except Exception: pass
             _tb = traceback.format_exc()
             return "❌ Assembly failed:\n" + _tb
-
-    # ══════════════════════════════════════════════════════════════════════
-    # INLINE VISUALIZER — architecture diagrams, flow charts, KPI dashboards
-    # ══════════════════════════════════════════════════════════════════════
-    async def render_visualization(
-        self,
-        html_code: str,
-        title: str = "Visualization",
-        __event_emitter__=None,
-    ):
-        """
-        Render an interactive HTML or SVG visualization inline in the chat.
-
-        Use this for architecture diagrams, flow charts, process maps, KPI
-        dashboards, gauge displays, anything that's easier to show than write.
-        The LLM supplies the SVG markup; this tool wraps it with IBM Carbon
-        theming, auto-sizing, and SVG/PNG/JPG download buttons.
-
-        Design system available to your SVG markup:
-
-        - Utility classes on child groups:
-            class="t"   — default text
-            class="ts"  — secondary text
-            class="th"  — heading text (bolder)
-            class="box" — subtle background rectangle
-            class="arr" — connector line (use marker-end for arrow)
-            class="leader" — dashed leader line
-            class="node" — hover-able node
-        - Color ramps (apply on parent <g>):
-            c-purple  c-teal  c-coral  c-pink  c-gray
-            c-blue    c-green c-amber  c-red
-          These auto-adapt to light/dark theme.
-        - IBM Carbon primary: #0F62FE  (accent: var(--primary))
-        - Recommended SVG setup:
-            <svg viewBox="0 0 1200 700" xmlns="http://www.w3.org/2000/svg">
-              <defs>
-                <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5"
-                        markerWidth="6" markerHeight="6" orient="auto">
-                  <path d="M0,0 L10,5 L0,10 z" fill="#8D8D8D"/>
-                </marker>
-              </defs>
-              ...
-            </svg>
-
-        :param html_code: HTML or SVG fragment. Use a viewBox. Don't include
-            <html>/<head>/<body> — those are added for you.
-        :param title: Short descriptive title for the visualization.
-        :return: Inline-rendered iframe embed.
-        """
-        _hb = None
-        try:
-            await self._emit(__event_emitter__, f"🎨 Creating visualization: {title}")
-            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('render_visualization'), initial_phase='🧩 Rendering visualization')
-            html = _build_svg_shell(html_code, title=title)
-            await self._emit(__event_emitter__, f"✅ {title} ready", done=True)
-            await self._stop_heartbeat(_hb)
-            return HTMLResponse(content=html, headers={"Content-Disposition": "inline"})
-        except Exception:
-            try: await self._stop_heartbeat(_hb)
-            except Exception: pass
-            return "❌ render_visualization failed:\n" + traceback.format_exc()
-
-    # ══════════════════════════════════════════════════════════════════════
-    # BATCH IMAGE ENRICHMENT — one image per section, guaranteed
-    # ══════════════════════════════════════════════════════════════════════
-    async def enrich_sections_with_images(
-        self,
-        sections_json: str,
-        default_kind: Literal["auto", "photo", "illustration"] = "auto",
-        max_images: Optional[int] = None,
-        __user__: Optional[dict] = None,
-        __request__=None,
-        __event_emitter__=None,
-    ) -> str:
-        """
-        Take a DRAFT sections array and return the SAME array with images
-        populated on a CURATED SUBSET of sections (not all). This is a speed
-        optimization: a 5-slide deck needs maybe 1 hero image, a 10-slide deck
-        needs 2-3, a 20-slide deck needs 4-5. Fewer image fetches = faster.
-
-        Image-count rule (auto when max_images=None):
-          1-5   sections  →  1 image
-          6-10  sections  →  2 images
-          11-15 sections  →  3 images
-          ...   (ceil(n/5))
-
-        Which sections get the images:
-          1. Sections with explicit "image_hint" are top priority (LLM picked
-             them as visual-worthy).
-          2. Remaining quota is filled by evenly spacing across the rest of
-             the deck so images aren't all clustered at the front.
-          3. Cover (if present at index 0) is de-prioritized since the cover
-             already has IBM branding.
-
-        Per-section image routing:
-          - If section has "image_id", "svg", or "_img_bytes" → skip (done).
-          - If section has "image_hint" → use as the generate_image prompt.
-          - Else auto-derive from title + first paragraph.
-
-        Image sources tried (with circuit breaker + host blocklist):
-          Google → Wikipedia article lead → Wikimedia Commons → DuckDuckGo
-          → pure-Python IBM-Carbon placeholder (always succeeds).
-
-        :param sections_json: JSON array of section objects.
-        :param default_kind: "auto" | "photo" | "illustration".
-        :param max_images: Hard cap on images to fetch. If None, auto: ceil(n/5).
-        """
-        _hb = None
-        try:
-            try:
-                sections = json.loads(sections_json) if isinstance(sections_json, str) else sections_json
-            except json.JSONDecodeError as e:
-                return json.dumps({"error": f"sections_json is not valid JSON: {e}"})
-            if not isinstance(sections, list) or not sections:
-                return json.dumps({"error": "sections_json must be a non-empty array"})
-
-            # Fast path: if enrichment is disabled globally, return sections unchanged
-            if self.valves.disable_image_enrichment:
-                await self._emit(__event_emitter__,
-                    "⚡ Image enrichment disabled (valve) — shipping text-only", done=True)
-                return json.dumps({
-                    "sections": sections,
-                    "stats": {"enriched": 0, "failed": 0, "skipped": len(sections), "capped": 0, "disabled": True},
-                    "next_step": "Pass these sections directly to assemble_document.",
-                }, indent=2)
-
-            await self._emit(__event_emitter__,
-                f"🎨 Enriching {len(sections)} section(s) with 1 hero image (text-only for the rest)")
-            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('enrich_sections_with_images'), initial_phase='🎨 Image enrichment')
-
-            # Partition: skip sections that already have imagery; enqueue the rest.
-            # THEN apply image-count cap — a 5-slide deck only needs ~1 image, not 5.
-            # This is the big speed lever: fewer image fetches = way less latency.
-            import math
-            stats = {"enriched": 0, "failed": 0, "skipped": 0, "capped": 0}
-            need_images: list[tuple[int, dict, str, str, str]] = []  # (idx, out, prompt, kind, caption)
-            enriched: list[dict] = [None] * len(sections)  # type: ignore[list-item]
-            for i, s in enumerate(sections):
-                if not isinstance(s, dict):
-                    enriched[i] = s; continue
-                out = dict(s)
-                if out.get("image_id") or out.get("svg") or out.get("_img_bytes"):
-                    stats["skipped"] += 1
-                    enriched[i] = out; continue
-                prompt = (out.get("image_hint") or "").strip()
-                has_explicit_hint = bool(prompt)
-                if not prompt:
-                    title = re.sub(r"^\d+\s*[-–—]?\s*", "", (out.get("title") or "")).strip()
-                    first_para = ""
-                    paras = out.get("paragraphs") or []
-                    if paras and isinstance(paras[0], str):
-                        first_para = paras[0][:160]
-                    prompt = (title + (" — " + first_para if first_para else "")).strip() or title or f"Section {i+1}"
-                resolved_kind = default_kind
-                if resolved_kind == "auto":
-                    resolved_kind = self._classify_image_kind(prompt)
-                caption = self._build_image_caption(prompt, resolved_kind)
-                need_images.append((i, out, prompt, resolved_kind, caption, has_explicit_hint))
-
-            # Compute image quota. NEW RULE (2026-04-19): 1 image per deck total,
-            # regardless of slide count. User feedback: multi-image enrichment
-            # added too much latency; a single hero image is plenty. Override only
-            # when max_images is explicitly passed.
-            n = len(need_images)
-            if max_images is None:
-                quota = 1 if n > 0 else 0
-            else:
-                quota = max(0, min(max_images, n))
-
-            # Pick which sections get images:
-            #   1. Sections with explicit image_hint — highest priority.
-            #   2. Then evenly spaced across remaining sections (skipping cover at idx 0 when possible).
-            chosen_ids: set = set()
-            # Pass 1: explicit hints
-            for item in need_images:
-                idx, _, _, _, _, has_hint = item
-                if has_hint and len(chosen_ids) < quota:
-                    chosen_ids.add(idx)
-            # Pass 2: even spacing across the remainder
-            remaining_slots = quota - len(chosen_ids)
-            if remaining_slots > 0:
-                unpicked = [item[0] for item in need_images if item[0] not in chosen_ids]
-                # De-prioritize index 0 (cover) until all others are picked
-                if len(unpicked) > remaining_slots and 0 in unpicked:
-                    unpicked = [i for i in unpicked if i != 0] + [0]
-                # Even spacing
-                step = max(1, len(unpicked) // max(1, remaining_slots))
-                for i, idx in enumerate(unpicked):
-                    if len(chosen_ids) >= quota: break
-                    if i % step == 0:
-                        chosen_ids.add(idx)
-                # Fill any leftover (edge cases)
-                for idx in unpicked:
-                    if len(chosen_ids) >= quota: break
-                    chosen_ids.add(idx)
-
-            # Build the actual fetch list; sections NOT chosen will remain image-less
-            # (the LLM can still put text/bullets on those slides — that's the speed win).
-            to_fetch: list[tuple[int, dict, str, str, str]] = []
-            for idx, out, prompt, kind, caption, _ in need_images:
-                if idx in chosen_ids:
-                    to_fetch.append((idx, out, prompt, kind, caption))
-                else:
-                    stats["capped"] += 1
-                    enriched[idx] = out  # text-only section — no image
-
-            await self._emit(__event_emitter__,
-                f"🖼️ Fetching {len(to_fetch)} image(s) — quota={quota} for {n} section(s); {stats['capped']} kept text-only for speed")
-
-            # Worker: runs the full fallback chain for one section (blocking → thread)
-            def _one(prompt: str, kind: str, caption: str) -> Optional[dict]:
-                image_rec = None
-                if kind == "illustration":
-                    try: image_rec = self._generate_image_via_mcp(prompt, caption)
-                    except Exception as e: print(f"[DocGen] mcp_img err: {e}")
-                if image_rec is None:
-                    try: image_rec = self._fetch_image_via_web(prompt, caption)
-                    except Exception as e: print(f"[DocGen] web_img err: {e}")
-                if image_rec is None:
-                    try: image_rec = self._generate_placeholder_image(prompt, caption)
-                    except Exception as e: print(f"[DocGen] placeholder err: {e}")
-                return image_rec
-
-            # Bounded parallelism with a semaphore so we don't overwhelm Wikimedia/DDG.
-            semaphore = asyncio.Semaphore(self.valves.enrich_parallelism)
-            async def _worker(item):
-                idx, out, prompt, kind, caption = item
-                async with semaphore:
-                    image_rec = await asyncio.to_thread(_one, prompt, kind, caption)
-                return (idx, out, prompt, caption, image_rec)
-
-            # Hard wall-clock timeout — 8 s max. If image fetch doesn't complete
-            # in time, ship text-only and let the deck proceed. User explicitly
-            # prioritizes latency over imagery.
-            try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(*[_worker(it) for it in to_fetch]),
-                    timeout=8.0,
-                )
-            except asyncio.TimeoutError:
-                await self._emit(__event_emitter__,
-                    "⏱️ Image enrichment over 8s — proceeding text-only for speed")
-                results = []
-
-            # Stitch results back into the enriched array in original order
-            for idx, out, prompt, caption, image_rec in results:
-                if image_rec:
-                    display_id = f"IMG{int(time.time() * 1000) % 100000}{idx+1:02d}"
-                    image_rec["display_id"] = display_id
-                    image_rec["caption"] = caption
-                    _IMAGE_STORE.pin(image_rec.get("id", ""), display_id)
-                    out["image_id"] = display_id
-                    out["image_caption"] = caption
-                    stats["enriched"] += 1
-                else:
-                    stats["failed"] += 1
-                enriched[idx] = out
-
-            await self._emit(__event_emitter__,
-                f"✅ Enriched {stats['enriched']}/{len(sections)}  (skipped {stats['skipped']}, failed {stats['failed']})",
-                done=True)
-            await self._stop_heartbeat(_hb)
-            return json.dumps({
-                "sections": enriched,
-                "stats": stats,
-                "next_step": (
-                    "Pass this enriched sections array back into assemble_document "
-                    "as sections_json. Every section now has image_id + image_caption."
-                ),
-            }, indent=2)
-        except Exception:
-            try: await self._stop_heartbeat(_hb)
-            except Exception: pass
-            return json.dumps({"error": traceback.format_exc()})
-
-    # ══════════════════════════════════════════════════════════════════════
-    # IMAGE GENERATION — proactive per-section image fetch
-    # ══════════════════════════════════════════════════════════════════════
-    async def generate_image(
-        self,
-        prompt: str,
-        kind: Literal["auto", "photo", "illustration"] = "auto",
-        caption_hint: Optional[str] = None,
-        __user__: Optional[dict] = None,
-        __request__=None,
-        __event_emitter__=None,
-    ) -> str:
-        """
-        Generate or fetch a single image for a document section. Ingests the
-        image into the in-memory store and returns its display_id (e.g. IMG1)
-        so the LLM can reference it in sections_json.
-
-        Routing rules:
-          - kind="photo"        → web search (Google/Wikimedia). Best for real
-                                  places, landmarks, products, company logos
-                                  (e.g. "Mysore Palace", "Red Fort Delhi",
-                                  "IBM Consulting logo").
-          - kind="illustration" → tries configured MCP image-generator servers
-                                  first (any MCP tool whose name contains
-                                  'generate_image', 'image_gen', 'text_to_image',
-                                  'dall', 'sdxl', 'stable_diffusion'), then
-                                  falls back to web search. Best for abstract
-                                  concepts, stylized diagrams, process art.
-          - kind="auto"         → routes automatically: proper-noun / place /
-                                  brand / product → photo; abstract concept or
-                                  any "diagram/chart/architecture" style prompt
-                                  → illustration.
-
-        The returned JSON contains the new display_id, the caption (~20 words
-        auto-generated or from caption_hint), and the source. Use the
-        display_id as the section's image_id field in assemble_document.
-
-        :param prompt: What to generate/find (e.g. "Mysore Palace at dusk").
-        :param kind: "auto" | "photo" | "illustration".
-        :param caption_hint: Optional caption text (~20 words). If omitted, one
-            is generated from the prompt.
-        """
-        _hb = None
-        try:
-            await self._emit(__event_emitter__, f"🖼️ Generating image: {prompt[:60]}")
-            _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('generate_image'), initial_phase='🖼️ Fetching image')
-            auth = self._auth_from_request(__request__)
-
-            resolved_kind = kind
-            if kind == "auto":
-                resolved_kind = self._classify_image_kind(prompt)
-                await self._emit(__event_emitter__, f"🧭 Auto-routed to {resolved_kind}")
-
-            caption = (caption_hint or self._build_image_caption(prompt, resolved_kind))
-
-            image_rec = None
-            source_used = None
-
-            if resolved_kind == "illustration":
-                # Try MCP image-gen servers first
-                image_rec = await asyncio.to_thread(
-                    self._generate_image_via_mcp, prompt, caption
-                )
-                if image_rec:
-                    source_used = "mcp:image_generator"
-
-            if image_rec is None:
-                # Fallback / photo path — web search
-                image_rec = await asyncio.to_thread(
-                    self._fetch_image_via_web, prompt, caption
-                )
-                if image_rec:
-                    source_used = "web_search"
-
-            if image_rec is None:
-                # Last-resort: generate a pure-Python IBM-Carbon placeholder PNG
-                # so the document section still gets an image, never empty. This
-                # guarantees generate_image always succeeds even in locked-down
-                # IBM sandboxes with no network / no MCP image-gen / no Google keys.
-                await self._emit(__event_emitter__,
-                    "🎨 No external image sources — generating IBM Carbon placeholder")
-                image_rec = await asyncio.to_thread(
-                    self._generate_placeholder_image, prompt, caption
-                )
-                if image_rec:
-                    source_used = "placeholder:ibm_carbon"
-
-            if image_rec is None:
-                await self._stop_heartbeat(_hb)
-                return json.dumps({
-                    "error": "Image generation failed at every fallback (MCP, web, and placeholder).",
-                    "hint": "This indicates Pillow is not importable — check open-webui's Python env.",
-                    "display_id": None,
-                    "caption": caption,
-                })
-
-            # Pin + assign display_id
-            display_id = f"IMG{int(time.time() * 1000) % 100000}"
-            image_rec["display_id"] = display_id
-            image_rec["caption"] = caption
-            _IMAGE_STORE.pin(image_rec.get("id", ""), display_id)
-
-            await self._emit(__event_emitter__, f"✅ Image ready: {display_id}", done=True)
-            await self._stop_heartbeat(_hb)
-            return json.dumps({
-                "display_id": display_id,
-                "caption": caption,
-                "source": source_used,
-                "width": image_rec.get("width"),
-                "height": image_rec.get("height"),
-                "next_step": (
-                    "Reference this display_id in sections_json as image_id when "
-                    "calling assemble_document. Add the caption as image_caption "
-                    "(~20 words)."
-                ),
-            }, indent=2)
-        except Exception:
-            try: await self._stop_heartbeat(_hb)
-            except Exception: pass
-            return json.dumps({"error": traceback.format_exc(), "display_id": None})
-
-    def _classify_image_kind(self, prompt: str) -> str:
-        """Heuristic: proper-noun / place / brand → photo; else illustration."""
-        p = (prompt or "").strip()
-        if not p:
-            return "illustration"
-        lower = p.lower()
-        # Abstract / diagram-ish hints → illustration
-        abstract_hints = [
-            "diagram", "architecture", "flow", "process", "topology", "schema",
-            "pipeline", "workflow", "concept", "dashboard", "icon", "illustration",
-            "art", "stylized", "abstract",
-        ]
-        for h in abstract_hints:
-            if h in lower:
-                return "illustration"
-        # Proper-noun / place / landmark signals → photo
-        # If most words are capitalized, or contains known place/landmark words
-        words = p.split()
-        capped = sum(1 for w in words if w[:1].isupper())
-        if words and capped / max(1, len(words)) >= 0.5:
-            return "photo"
-        place_hints = [
-            "palace", "temple", "fort", "monument", "museum", "building",
-            "landmark", "skyline", "city", "logo", "brand", "product",
-            "office", "headquarters", "campus",
-        ]
-        for h in place_hints:
-            if h in lower:
-                return "photo"
-        return "illustration"
-
-    def _build_image_caption(self, prompt: str, kind: str) -> str:
-        """Produce a ~20-word caption for the image."""
-        p = (prompt or "").strip()
-        if not p:
-            return "Visual reference."
-        # Already short enough? just prepend a descriptor
-        if len(p.split()) >= 15:
-            return p[:140]
-        if kind == "photo":
-            return f"Iconic view of {p} — captured to anchor the section with a recognisable visual reference for the reader."[:140]
-        return f"Illustrative visual representing {p} — generated to reinforce the section's narrative with a purpose-built graphic."[:140]
-
-    def _generate_image_via_mcp(self, prompt: str, caption: str) -> Optional[dict]:
-        """Try every configured MCP server's image-gen-ish tool. Returns an image_rec."""
-        servers = self._load_mcp_servers()
-        if not servers:
-            return None
-        gen_tool_keywords = [
-            "generate_image", "image_generator", "image_gen", "text_to_image",
-            "txt2img", "dall_e", "dalle", "sdxl", "stable_diffusion",
-            "create_image", "draw_image",
-        ]
-        catalog = self._discover_mcp_catalog(servers)
-        for t in catalog:
-            name = (t.get("name") or "").lower()
-            if not any(k in name for k in gen_tool_keywords):
-                continue
-            try:
-                srv = next((s for s in servers if s["id"] == t["server_id"]), None)
-                if not srv: continue
-                client = _get_mcp_client(srv["url"],
-                                          headers=self._mcp_headers(srv),
-                                          transport=srv.get("transport"))
-                # Build args — most image gens take {"prompt": "..."} or {"text": "..."}
-                schema = t.get("inputSchema") or {}
-                args = self._auto_fill_tool_args(prompt, schema)
-                if "prompt" not in args and "text" not in args:
-                    args["prompt"] = prompt
-                result = client.call_tool(t["name"], args)
-                src_meta = {
-                    "source": f"mcp://{t['server_id']}/{t['name']}",
-                    "ext": ".mcp_img", "doc_type": "mcp_generated",
-                    "mcp_tool_name": t["name"],
-                }
-                tc, imgs = self._parse_mcp_result(result, t, client, src_meta, prompt)
-                # Many image-gen MCPs return the image as a URL inside a text
-                # block / structuredContent rather than a proper image/resource
-                # block (e.g. ICA: pre-signed S3 URL pointing to a .png).
-                # If no inline images came back, hunt for URLs and download.
-                if not imgs:
-                    url_imgs = self._extract_images_from_mcp_urls(result, src_meta, prompt)
-                    imgs = url_imgs
-                if imgs:
-                    img = imgs[0]
-                    img["caption"] = caption
-                    img["context"] = prompt
-                    return img
-            except Exception as e:
-                print(f"[DocGen] MCP image-gen via {t.get('name')} failed: {e}")
-                continue
-        return None
-
     _IMG_URL_RE = re.compile(
         r"https?://[^\s\"'<>)\}]+?\.(?:png|jpe?g|webp|gif|bmp|tiff?)(?:\?[^\s\"'<>)\}]*)?",
         re.IGNORECASE,
     )
-    # Also match pre-signed S3 URLs that don't have an obvious image extension
-    # but do have querystring signature params (AWSAccessKey, Signature, etc.)
     _PRESIGNED_URL_RE = re.compile(
         r"https?://[^\s\"'<>)\}]+?\?[^\s\"'<>)\}]*(?:AWSAccessKeyId|X-Amz-Signature|Signature=)[^\s\"'<>)\}]*",
         re.IGNORECASE,
     )
-
     def _extract_images_from_mcp_urls(self, result: dict, src_meta: dict, prompt: str) -> list[dict]:
-        """Scan an MCP result (text blocks + structuredContent) for image URLs
-        and presigned-S3-style URLs, download each, and ingest as images.
-
-        This catches image-generator MCPs (e.g. ICA) that return their output
-        as a URL in a text block rather than as a proper image/resource block.
-        """
         out: list[dict] = []
-        # Collect candidate URLs from all text sources
         texts: list[str] = []
         for block in (result.get("content") or []):
             if block.get("type") == "text":
@@ -2687,9 +1597,7 @@ class Tools:
         if sc:
             try:
                 texts.append(json.dumps(sc))
-            except Exception:
-                pass
-
+            except Exception: pass
         candidates: list[str] = []
         seen: set = set()
         for txt in texts:
@@ -2701,11 +1609,7 @@ class Tools:
                 u = m.group(0)
                 if u not in seen:
                     seen.add(u); candidates.append(u)
-
-        if not candidates:
-            return out
-
-        # Download each (first successful one is enough for image-gen)
+        if not candidates: return out
         for u in candidates[:3]:
             rec = self._ingest_remote_image(u, {
                 "url": u,
@@ -2717,29 +1621,18 @@ class Tools:
                 out.append(rec)
                 break
         return out
-
-    # Circuit-breaker state (class-level so all parallel workers share it).
-    # When a source returns 429 / 5xx / bulk failures, we trip the breaker for
-    # _SOURCE_COOLDOWN_S seconds so subsequent workers skip that source
-    # immediately instead of piling on and wasting request_timeout x N.
     _SOURCE_COOLDOWN_S = 30.0
-    _source_breakers: dict = {}   # {source_name: unix_ts_until_which_open}
+    _source_breakers: dict = {}
     _breakers_lock = threading.Lock()
-
     @classmethod
     def _breaker_is_open(cls, source_name: str) -> bool:
         with cls._breakers_lock:
             until = cls._source_breakers.get(source_name, 0)
             return time.time() < until
-
     @classmethod
     def _breaker_trip(cls, source_name: str, cooldown: Optional[float] = None):
         with cls._breakers_lock:
             cls._source_breakers[source_name] = time.time() + (cooldown or cls._SOURCE_COOLDOWN_S)
-        print(f"[DocGen] circuit-breaker TRIPPED for '{source_name}' — skipping for {cooldown or cls._SOURCE_COOLDOWN_S:.0f}s")
-
-    # Domains known to block bots / rate-limit / hotlink-forbid. Downloading
-    # from these reliably fails after a long timeout, so skip them upfront.
     _BLOCKED_IMAGE_HOSTS = frozenset([
         "emvigotech.com",
         "artificall.com",
@@ -2751,197 +1644,25 @@ class Tools:
         "logodix.com",
         "pinterest.com", "pinimg.com",
     ])
-
     def _prefilter_candidates(self, candidates: list[dict]) -> list[dict]:
-        """Drop candidates whose host is on the blocklist."""
         out = []
         for c in candidates:
             url = (c.get("url") or "").lower()
             host = urlparse(url).netloc.lower().lstrip("www.")
-            # Match suffix — "c8.alamy.com" matches "alamy.com"
             blocked = any(host == h or host.endswith("." + h) for h in self._BLOCKED_IMAGE_HOSTS)
             if not blocked:
                 out.append(c)
         return out
-
-    def _fetch_image_via_web(self, prompt: str, caption: str) -> Optional[dict]:
-        """Fetch an image via web search with per-source fallback on DOWNLOAD failure.
-
-        Order tried (Wikipedia first — reliable & keyless, no blocked hosts):
-          1. Google Programmable Search (if valves set)
-          2. Wikipedia article lead-images (upload.wikimedia.org — high relevance for
-             proper nouns, landmarks, brands, people; never blocks bots)
-          3. Wikimedia Commons file search (broader bitmap search)
-          4. DuckDuckGo Images (LAST — returns lots of blocked-host URLs)
-
-        On each source: pre-filter candidates (drop known-blocked hosts), then
-        download in parallel. First source to successfully download wins.
-        """
-        source_attempts: list[tuple[str, callable]] = []
-        if self.valves.google_api_key and self.valves.google_cx:
-            source_attempts.append(("google", lambda: self._google_search_images(prompt, 5)))
-        # Wikipedia FIRST — known-good host (upload.wikimedia.org), compliant UA,
-        # exact proper-noun match. Catches 80% of IBM/Accenture/Red Fort-type queries.
-        source_attempts.append(("wikipedia", lambda: self._wikipedia_lead_images(prompt, 5)))
-        source_attempts.append(("wikimedia", lambda: self._wikimedia_search_images(prompt, 5)))
-        # DuckDuckGo LAST — returns lots of low-quality / blocked-host URLs
-        # that waste time with timeouts.
-        source_attempts.append(("duckduckgo", lambda: self._duckduckgo_search_images(prompt, 5)))
-
-        for source_name, fetch in source_attempts:
-            # Circuit breaker — skip if this source recently failed (rate-limited)
-            if self._breaker_is_open(source_name):
-                continue
-            try:
-                candidates = fetch() or []
-            except Exception as e:
-                print(f"[DocGen] {source_name} search for {prompt!r} failed: {e}")
-                # Trip the breaker on exception (likely API down)
-                self._breaker_trip(source_name)
-                continue
-            if not candidates:
-                continue
-            # Pre-filter: drop blocked hosts before wasting connect-timeout on them
-            filtered = self._prefilter_candidates(candidates)
-            if not filtered:
-                print(f"[DocGen] {source_name} returned {len(candidates)} URLs but all on blocklist; next source")
-                continue
-            ingested = self._ingest_images_parallel(
-                filtered, max_workers=self.valves.image_fetch_parallelism
-            )
-            if ingested:
-                top = ingested[0]
-                top["caption"] = caption
-                top["context"] = prompt
-                top["source_resolved"] = source_name
-                return top
-            print(f"[DocGen] {source_name} returned {len(filtered)} URLs for {prompt!r} but none downloaded; trying next source")
-            # Trip breaker if all downloads failed — signals rate-limit / bulk block
-            self._breaker_trip(source_name)
-        return None
-
-    def _generate_placeholder_image(self, prompt: str, caption: str) -> Optional[dict]:
-        """Last-resort: generate an IBM-Carbon-styled placeholder PNG in pure
-        Python when neither MCP nor web search is available (e.g. locked-down
-        IBM sandboxes). Never returns None — always produces something embedable.
-        """
-        try:
-            from PIL import Image as _PILImage, ImageDraw, ImageFont
-            W, H = 1600, 900
-            # IBM Carbon-inspired gradient background
-            img = _PILImage.new("RGB", (W, H), (15, 98, 254))  # IBM blue 60
-            draw = ImageDraw.Draw(img)
-            # Darker top band
-            for y in range(0, 180):
-                shade = int(15 * (1 - y / 180))
-                draw.rectangle([0, y, W, y + 1], fill=(shade, int(50 + 48 * y / 180), int(150 + 104 * y / 180)))
-            # White content panel
-            draw.rounded_rectangle([80, 220, W - 80, H - 80], radius=12, fill=(255, 255, 255))
-            # IBM Carbon accent strip
-            draw.rectangle([80, 220, W - 80, 280], fill=(15, 98, 254))
-
-            # Try to load a bold sans-serif font; fall back to default
-            font_large = font_small = None
-            for font_path in [
-                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-                "/System/Library/Fonts/Helvetica.ttc",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            ]:
-                try:
-                    font_large = ImageFont.truetype(font_path, 64)
-                    font_small = ImageFont.truetype(font_path, 28)
-                    break
-                except Exception:
-                    continue
-            if font_large is None:
-                font_large = ImageFont.load_default()
-                font_small = ImageFont.load_default()
-
-            # Wrap the prompt for the title
-            words = (prompt or "Generated").split()
-            lines, current = [], ""
-            for w in words:
-                test = (current + " " + w).strip()
-                if len(test) <= 28:
-                    current = test
-                else:
-                    if current: lines.append(current)
-                    current = w
-            if current: lines.append(current)
-            lines = lines[:3]
-            # Draw title
-            y = 340
-            for line in lines:
-                draw.text((140, y), line, fill=(22, 22, 22), font=font_large)
-                y += 80
-            # Draw caption (wrapped)
-            cap_words = caption.split()
-            cap_lines = []
-            cur = ""
-            for w in cap_words:
-                test = (cur + " " + w).strip()
-                if len(test) <= 68:
-                    cur = test
-                else:
-                    if cur: cap_lines.append(cur)
-                    cur = w
-            if cur: cap_lines.append(cur)
-            y = max(y + 40, 620)
-            for line in cap_lines[:3]:
-                draw.text((140, y), line, fill=(82, 82, 82), font=font_small)
-                y += 40
-            # IBM Consulting tag
-            draw.text((140, H - 140), "IBM Consulting", fill=(15, 98, 254), font=font_small)
-
-            src = {
-                "source": "generated:placeholder",
-                "ext": ".png",
-                "doc_type": "generated",
-            }
-            rec = self._store_image(img, src, caption[:200], prompt[:200],
-                                     "generated: placeholder (no external image source available)",
-                                     "placeholder")
-            if rec:
-                rec["caption"] = caption
-                rec["context"] = prompt
-                rec["width"] = W
-                rec["height"] = H
-            return rec
-        except Exception as e:
-            print(f"[DocGen] placeholder image generation failed: {e}")
-            return None
-
-    # ══════════════════════════════════════════════════════════════════════
-    # MCP HELPERS — parse results, extract images from content/resources
-    # ══════════════════════════════════════════════════════════════════════
     def _load_mcp_servers(self) -> list[dict]:
-        """
-        Parse the mcp_servers_json valve. Empty → [].
-
-        Supported entry shape (matches the ICA / ContextForge config pattern):
-          {
-            "id":          "<short-id>",
-            "name":        "<display name>",
-            "url":         "<MCP server URL, e.g. https://.../servers/<uuid>/sse>",
-            "type":        "sse" | "streamable-http"  (optional — auto-detected from URL),
-            "auth_header": "<full Authorization header, e.g. 'Bearer <token>'>",
-            "headers":     { "X-Custom": "..." }      (optional extra headers),
-            "tools":       ["tool1", "tool2"]         (optional allowlist)
-          }
-        """
         raw = (self.valves.mcp_servers_json or "").strip()
-        if not raw:
-            return []
+        if not raw: return []
         try:
             data = json.loads(raw)
-
-            # Also accept the IBM/ContextForge style {"servers": {...}} wrapper
             if isinstance(data, dict):
                 if "servers" in data and isinstance(data["servers"], dict):
                     flat = []
                     for sid, entry in data["servers"].items():
-                        if not isinstance(entry, dict):
-                            continue
+                        if not isinstance(entry, dict): continue
                         merged = dict(entry)
                         merged["id"] = sid
                         flat.append(merged)
@@ -2949,40 +1670,29 @@ class Tools:
                 elif "mcpServers" in data and isinstance(data["mcpServers"], dict):
                     flat = []
                     for sid, entry in data["mcpServers"].items():
-                        if not isinstance(entry, dict):
-                            continue
+                        if not isinstance(entry, dict): continue
                         merged = dict(entry)
                         merged["id"] = sid
                         flat.append(merged)
                     data = flat
                 else:
                     data = [data]
-
-            if not isinstance(data, list):
-                return []
-
+            if not isinstance(data, list): return []
             out = []
             for entry in data:
-                if not isinstance(entry, dict):
-                    continue
-                if not entry.get("id") or not entry.get("url"):
-                    continue
-
-                # Transport: explicit type > URL suffix > default streamable
+                if not isinstance(entry, dict): continue
+                if not entry.get("id") or not entry.get("url"): continue
                 t = (entry.get("type") or "").lower()
                 if t in ("sse",):
                     transport = _MCPClient.TRANSPORT_SSE
                 elif t in ("streamable-http", "streamable_http", "http", "mcp"):
                     transport = _MCPClient.TRANSPORT_STREAMABLE
                 else:
-                    transport = None  # let client auto-detect
-
-                # Auth can be in "auth_header" (full value) or "headers.Authorization"
+                    transport = None
                 headers = dict(entry.get("headers") or {})
                 auth = (entry.get("auth_header") or "").strip()
                 if auth and "Authorization" not in headers:
                     headers["Authorization"] = auth
-
                 out.append({
                     "id": entry["id"],
                     "name": entry.get("name", entry["id"]),
@@ -2995,23 +1705,12 @@ class Tools:
         except Exception as e:
             print(f"[MCP] mcp_servers_json parse failed: {e}")
             return []
-
     def _mcp_headers(self, srv: dict) -> dict:
-        """Return full header dict for a server config (Authorization + extras)."""
         return dict(srv.get("headers") or {})
-
-    # ── Auto-routing helpers ──
-
     def _discover_mcp_catalog(self, servers: list[dict], emitter=None) -> list[dict]:
-        """
-        List tools across all configured servers. Results cached on the Tools
-        instance for the configured TTL to avoid hammering servers on every call.
-        Returns a flat list of {server_id, name, description, inputSchema, _meta, ...}.
-        """
         now = time.time()
         if not hasattr(self, "_mcp_catalog_cache"):
             self._mcp_catalog_cache: dict = {}
-
         ttl = getattr(self.valves, "mcp_catalog_ttl_seconds", 600)
         catalog: list[dict] = []
         for srv in servers:
@@ -3027,7 +1726,6 @@ class Tools:
                 allow = set(srv.get("tools", []) or [])
                 if allow:
                     tools = [t for t in tools if t.get("name") in allow]
-                # Flatten with server context
                 flat = []
                 for t in tools:
                     flat.append({
@@ -3043,20 +1741,9 @@ class Tools:
             except Exception as e:
                 print(f"[MCP auto] catalog fetch failed on {srv['id']}: {e}")
         return catalog
-
     def _rank_mcp_tools(self, query: str, catalog: list[dict]) -> list[dict]:
-        """
-        Score each tool against the query. Higher is better.
-        Factors:
-          - Lexical overlap of query tokens with tool name + description
-          - Name-match bonus (query tokens appearing in tool name count double)
-          - Action-verb alignment (search, get, fetch, list, analyze, etc.)
-          - Schema-compatibility bonus (tool has an arg we can plausibly fill)
-        """
         q_tokens = set(re.findall(r"\w{3,}", query.lower()))
-        if not q_tokens:
-            return []
-
+        if not q_tokens: return []
         action_verbs = {
             "search": {"search", "find", "lookup", "query", "look"},
             "get":    {"get", "fetch", "retrieve", "read", "show", "display"},
@@ -3069,29 +1756,19 @@ class Tools:
         for intent, synonyms in action_verbs.items():
             if synonyms & q_tokens:
                 query_intent.add(intent)
-
         scored = []
         for t in catalog:
             name = (t.get("name") or "").lower()
             desc = (t.get("description") or "").lower()
             name_tokens = set(re.findall(r"\w{3,}", name))
             desc_tokens = set(re.findall(r"\w{3,}", desc))
-
-            # Base: topical overlap with description
             desc_overlap = len(q_tokens & desc_tokens)
-            # Name overlap weighted heavier
             name_overlap = len(q_tokens & name_tokens) * 2.0
-
-            # Intent alignment: reward if the tool name/description uses the same action verbs
             intent_bonus = 0.0
             for intent, synonyms in action_verbs.items():
-                if intent not in query_intent:
-                    continue
+                if intent not in query_intent: continue
                 if synonyms & (name_tokens | desc_tokens):
                     intent_bonus += 1.5
-
-            # Schema compatibility: small bonus if the tool has no required args
-            # (safe to call blind), smaller bonus if we can fill required args
             schema = t.get("inputSchema") or {}
             required = schema.get("required") or []
             props = (schema.get("properties") or {})
@@ -3101,114 +1778,72 @@ class Tools:
                 can_fill = sum(1 for r in required
                                if self._can_infer_arg(query, r, props.get(r, {})))
                 schema_bonus = (can_fill / len(required)) * 1.2
-
             score = desc_overlap + name_overlap + intent_bonus + schema_bonus
-            if score <= 0:
-                continue
+            if score <= 0: continue
             t_copy = dict(t)
             t_copy["_score"] = score
             scored.append(t_copy)
-
         scored.sort(key=lambda x: x["_score"], reverse=True)
         return scored
-
     def _can_infer_arg(self, query: str, arg_name: str, arg_schema: dict) -> bool:
-        """Quick check — can we plausibly fill this argument from the query?"""
         arg_type = (arg_schema.get("type") or "string").lower()
         arg_name_l = arg_name.lower()
-
-        # Very permissive for string args — most can be filled with the query itself
         if arg_type == "string":
-            # These special names are usually fillable from free-text queries
             if any(k in arg_name_l for k in (
                 "query", "question", "text", "content", "topic",
                 "keyword", "search", "term", "prompt", "input",
                 "url", "link", "title", "name"
             )):
                 return True
-            # ID-ish args need the query to contain an ID pattern
-            if "id" in arg_name_l:
-                return bool(re.search(r"\b[A-Z0-9]{3,}[-_]?\d+\b|\b[a-f0-9]{8,}\b", query))
-            # Otherwise it's still a string; we'll pass the query and hope
+            if "id" in arg_name_l: return bool(re.search(r"\b[A-Z0-9]{3,}[-_]?\d+\b|\b[a-f0-9]{8,}\b", query))
             return True
-
-        if arg_type in ("integer", "number"):
-            return bool(re.search(r"\b\d+\b", query))
-
-        if arg_type == "boolean":
-            return True  # default to False, schema usually has defaults
-
-        if arg_type == "array":
-            return True  # we'll pass [] or split the query
-
-        return False  # object/unknown — skip
-
+        if arg_type in ("integer", "number"): return bool(re.search(r"\b\d+\b", query))
+        if arg_type == "boolean": return True
+        if arg_type == "array": return True
+        return False
     def _auto_fill_tool_args(self, query: str, input_schema: dict) -> dict:
-        """
-        Produce an argument dict for a tool given only the query.
-        Heuristic and intentionally simple — covers 90% of real MCP tools
-        whose schemas look like {query: str} or {topic: str, limit?: int}.
-        Anything more complex falls through with sensible defaults.
-        """
-        if not input_schema or not isinstance(input_schema, dict):
-            return {}
+        if not input_schema or not isinstance(input_schema, dict): return {}
         props = input_schema.get("properties") or {}
         required = set(input_schema.get("required") or [])
-        if not props:
-            return {}
-
+        if not props: return {}
         out: dict = {}
         for arg_name, schema in props.items():
             arg_type = (schema.get("type") or "string").lower()
             arg_name_l = arg_name.lower()
             default = schema.get("default")
             is_required = arg_name in required
-
-            # Prefer explicit default when present and not required
             if not is_required and default is not None:
                 out[arg_name] = default
                 continue
-
             if arg_type == "string":
-                # URL-shaped args — look for a URL in the query
                 if any(k in arg_name_l for k in ("url", "link", "href")):
                     m = re.search(r"https?://\S+", query)
                     if m: out[arg_name] = m.group(0); continue
-                    if is_required: out[arg_name] = query  # fallback
+                    if is_required: out[arg_name] = query
                     continue
-                # ID-shaped args — look for ID patterns
                 if re.search(r"(_|^)id(_|$)", arg_name_l) or arg_name_l.endswith("_id"):
                     m = re.search(r"\b([A-Z]+[-_]?\d{2,}|[a-f0-9]{8,})\b", query)
                     if m: out[arg_name] = m.group(0); continue
-                    if is_required: out[arg_name] = ""  # fallback
+                    if is_required: out[arg_name] = ""
                     continue
-                # Date-shaped args — only fill if we find an actual date pattern
                 if any(k in arg_name_l for k in ("date", "from", "to", "since", "until", "time")):
                     m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", query)
                     if m: out[arg_name] = m.group(1); continue
-                    # No date in query — skip (let server default take over)
                     if is_required:
-                        # Only fill if required, use today
                         out[arg_name] = time.strftime("%Y-%m-%d")
                     continue
-                # Email / phone patterns — only fill if matched
                 if "email" in arg_name_l:
                     m = re.search(r"\b[\w.+-]+@[\w-]+\.\w+\b", query)
                     if m: out[arg_name] = m.group(0); continue
                     if is_required: out[arg_name] = ""
                     continue
-                # "limit"-ish (shouldn't be string but some tools have it)
-                # Default: use the query as the string (best-fit for query/topic/keyword args)
                 if is_required or any(k in arg_name_l for k in (
                     "query", "question", "text", "content", "topic",
                     "keyword", "search", "term", "prompt", "input", "title", "name"
                 )):
                     out[arg_name] = query
-                # Otherwise skip — let server default handle it
                 continue
-
             if arg_type in ("integer", "number"):
-                # Pull first integer from query, else use schema default or 10
                 m = re.search(r"\b(\d+)\b", query)
                 if m:
                     val = int(m.group(1))
@@ -3216,26 +1851,22 @@ class Tools:
                 elif default is not None:
                     out[arg_name] = default
                 elif is_required:
-                    # reasonable default for "limit", "max_results", "top_k", etc.
                     low_name = arg_name_l
                     if any(k in low_name for k in ("limit", "max", "top", "count", "k")):
                         out[arg_name] = 10
                     else:
                         out[arg_name] = 1
                 continue
-
             if arg_type == "boolean":
                 if default is not None:
                     out[arg_name] = default
                 elif is_required:
                     out[arg_name] = False
                 continue
-
             if arg_type == "array":
                 items = schema.get("items", {}) or {}
                 item_type = (items.get("type") or "string").lower()
                 if item_type == "string":
-                    # Split query on commas if any, else send single-item array
                     if "," in query:
                         out[arg_name] = [p.strip() for p in query.split(",") if p.strip()]
                     else:
@@ -3243,42 +1874,15 @@ class Tools:
                 else:
                     out[arg_name] = []
                 continue
-
-            # Object/unknown — skip unless required
             if is_required:
                 out[arg_name] = {}
-
         return out
-
-    # ── End auto-routing helpers ──
-
     def _parse_mcp_result(self, result: dict, tool_def: Optional[dict],
                            client: Any, src_meta: dict,
                            query: str) -> tuple[list[dict], list[dict]]:
-        """
-        Parse a tool call result per the MCP spec.
-
-        The result shape:
-          {
-            "content": [
-              {"type": "text", "text": "..."},
-              {"type": "image", "data": "<b64>", "mimeType": "image/png"},
-              {"type": "resource", "resource": {"uri": "...", "text": "..." | "blob": "<b64>", "mimeType": "..."}},
-            ],
-            "structuredContent": {...},   // optional, model-facing structured data
-            "isError": false,
-            "_meta": {...}
-          }
-
-        We extract:
-          - text_chunks: from every text block + from structuredContent (stringified) + from ui:// HTML
-          - images:      from every image block + from <img> tags inside any HTML resource + from image resources
-        """
         text_chunks: list[dict] = []
         images: list[dict] = []
         image_budget = self.valves.mcp_max_image_extract_per_call
-
-        # 1) Walk content blocks
         for block in (result.get("content") or []):
             btype = block.get("type")
             if btype == "text":
@@ -3290,22 +1894,18 @@ class Tools:
                             "page": 0, "doc_type": "mcp",
                         })
             elif btype == "image":
-                if len(images) >= image_budget:
-                    continue
+                if len(images) >= image_budget: continue
                 rec = self._ingest_mcp_image_block(block, src_meta,
                                                      caption=src_meta.get("mcp_tool_name", ""))
                 if rec:
                     images.append(rec)
             elif btype == "resource":
                 res = block.get("resource") or {}
-                # Recurse into resource contents
                 tc, ti = self._extract_from_mcp_resource_contents([res], src_meta, client)
                 text_chunks.extend(tc)
                 for r in ti:
                     if len(images) < image_budget:
                         images.append(r)
-
-        # 2) structuredContent — stringify as one extra text chunk
         sc = result.get("structuredContent")
         if sc:
             try:
@@ -3315,12 +1915,7 @@ class Tools:
                     "source": src_meta["source"],
                     "page": 0, "doc_type": "mcp",
                 })
-            except Exception:
-                pass
-
-        # 3) If tool has _meta.ui.resourceUri and we haven't already harvested it,
-        #    fetch and parse (caller also does this when images is empty — that's fine,
-        #    the url-based caching inside client makes it cheap)
+            except Exception: pass
         if tool_def and not images:
             ui_uri = (tool_def.get("_meta") or {}).get("ui", {}).get("resourceUri")
             if ui_uri:
@@ -3335,38 +1930,22 @@ class Tools:
                             images.append(r)
                 except Exception as e:
                     print(f"[MCP] UI resource fetch in _parse_mcp_result failed: {e}")
-
-        # 4) Fallback: scan text + structuredContent for image URLs (covers ICA
-        # image-generator returning a pre-signed S3 URL in a text block, and
-        # any MCP tool that returns URLs to images in its text output).
         if len(images) < image_budget:
             url_imgs = self._extract_images_from_mcp_urls(result, src_meta, query)
             for r in url_imgs:
                 if len(images) < image_budget:
                     images.append(r)
-
         return text_chunks, images
-
     def _extract_from_mcp_resource_contents(
         self, contents: list[dict], src_meta: dict, client: Any
     ) -> tuple[list[dict], list[dict]]:
-        """
-        A resource's 'contents' is a list of embedded parts. Each part can be:
-          - text:  {"uri": "...", "mimeType": "text/plain"|"text/html"|"application/json", "text": "..."}
-          - blob:  {"uri": "...", "mimeType": "image/png"|..., "blob": "<b64>"}
-        HTML content (including text/html;profile=mcp-app) is scanned for <img> tags
-        and <svg> blocks, which we extract as images.
-        """
         text_chunks: list[dict] = []
         images: list[dict] = []
-
         for part in (contents or []):
             mime = (part.get("mimeType") or "").lower()
             uri = part.get("uri", "")
             is_ui = uri.startswith("ui://") or "mcp-app" in mime or "skybridge" in mime
-
             if part.get("blob"):
-                # Binary resource (often an image)
                 if mime.startswith("image/"):
                     try:
                         img_bytes = base64.b64decode(part["blob"])
@@ -3380,11 +1959,9 @@ class Tools:
                             images.append(rec)
                     except Exception as e:
                         print(f"[MCP] blob image decode failed: {e}")
-
             elif part.get("text") is not None:
                 txt = part["text"]
                 if mime.startswith("text/html") or is_ui:
-                    # Parse HTML for inline images + text
                     tchunks, iimgs = self._extract_from_html(txt, src_meta, base_uri=uri)
                     text_chunks.extend(tchunks)
                     images.extend(iimgs)
@@ -3402,37 +1979,24 @@ class Tools:
                             "page": 0, "doc_type": "mcp",
                         })
                 else:
-                    # Plain text
                     for sub in self._chunk_text(txt):
                         text_chunks.append({
                             "content": sub, "source": src_meta["source"],
                             "page": 0, "doc_type": "mcp",
                         })
-
         return text_chunks, images
-
     def _extract_from_html(self, html: str, src_meta: dict,
                             base_uri: str = "") -> tuple[list[dict], list[dict]]:
-        """
-        Scan HTML for <img> tags and inline <svg> blocks. Pull visible text as chunks.
-        Lightweight — uses regex, not a full DOM parser (which would be overkill here).
-        """
         text_chunks: list[dict] = []
         images: list[dict] = []
-
-        # --- Extract <img> src values ---
         for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', html, re.I):
             src = m.group(1).strip()
-            if not src:
-                continue
-            # alt text for caption
+            if not src: continue
             alt_m = re.search(r'alt=["\']([^"\']*)["\']', m.group(0), re.I)
             alt = alt_m.group(1) if alt_m else ""
             rec = self._ingest_html_image_src(src, src_meta, caption=alt, context=base_uri)
             if rec:
                 images.append(rec)
-
-        # --- Extract inline <svg>...</svg> blocks, rasterize if possible ---
         for m in re.finditer(r'<svg[\s>].*?</svg>', html, re.I | re.S):
             svg_text = m.group(0)
             try:
@@ -3449,9 +2013,6 @@ class Tools:
                         images.append(rec)
             except Exception as e:
                 print(f"[MCP] inline SVG rasterize failed: {e}")
-
-        # --- Visible text from the HTML body ---
-        # Strip tags very loosely; good enough for lexical ranking
         stripped = re.sub(r'<script.*?</script>', ' ', html, flags=re.I | re.S)
         stripped = re.sub(r'<style.*?</style>', ' ', stripped, flags=re.I | re.S)
         stripped = re.sub(r'<[^>]+>', ' ', stripped)
@@ -3462,50 +2023,37 @@ class Tools:
                     "content": sub, "source": src_meta["source"],
                     "page": 0, "doc_type": "mcp",
                 })
-
         return text_chunks, images
-
     def _ingest_mcp_image_block(self, block: dict, src_meta: dict,
                                   caption: str = "") -> Optional[dict]:
-        """An MCP content block of type 'image' carries base64 + mimeType."""
         data = block.get("data")
-        if not data:
-            return None
+        if not data: return None
         try:
             img_bytes = base64.b64decode(data)
-        except Exception:
-            return None
+        except Exception: return None
         return self._ingest_raw_image_bytes(
             img_bytes, src_meta,
             caption=caption or "mcp image",
             context=src_meta.get("mcp_tool_name", ""),
             location=src_meta.get("source", "mcp"),
         )
-
     def _ingest_raw_image_bytes(self, img_bytes: bytes, src_meta: dict,
                                   caption: str, context: str,
                                   location: str) -> Optional[dict]:
-        """Generic ingest path — used by MCP image blocks, resource blobs, and HTML <img>."""
         try:
             pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        except Exception:
-            return None
-        if not self._passes_filter(pil):
-            return None
+        except Exception: return None
+        if not self._passes_filter(pil): return None
         return self._store_image(pil, src_meta, caption, context, location,
                                   tag=src_meta.get("mcp_tool_name", "mcp"))
-
     def _ingest_html_image_src(self, src: str, src_meta: dict,
                                  caption: str, context: str) -> Optional[dict]:
-        """Handle both data: URIs and http(s): URLs inside an HTML <img>."""
         src = src.strip()
         if src.startswith("data:"):
-            # data:image/png;base64,xxxx  — decode directly
             try:
                 _, b64_part = src.split(",", 1)
                 img_bytes = base64.b64decode(b64_part)
-            except Exception:
-                return None
+            except Exception: return None
             return self._ingest_raw_image_bytes(
                 img_bytes, src_meta, caption=caption or "inline data URI",
                 context=context, location=src[:60] + "...",
@@ -3515,8 +2063,7 @@ class Tools:
                 r = requests.get(src, timeout=self.valves.web_image_fetch_timeout,
                                  headers={"User-Agent": "Mozilla/5.0 (ibm-docgen)"})
                 r.raise_for_status()
-                if not r.content:
-                    return None
+                if not r.content: return None
                 return self._ingest_raw_image_bytes(
                     r.content, src_meta,
                     caption=caption or urlparse(src).path.rsplit("/", 1)[-1],
@@ -3526,12 +2073,7 @@ class Tools:
             except Exception as e:
                 print(f"[MCP] HTML image fetch failed for {src}: {e}")
                 return None
-        # Unsupported scheme (e.g. cid:, file:) — skip
         return None
-
-    # ══════════════════════════════════════════════════════════════════════
-    # OWUI API
-    # ══════════════════════════════════════════════════════════════════════
     def _auth_from_request(self, request) -> dict:
         headers = {}
         if request and hasattr(request, "headers"):
@@ -3539,7 +2081,6 @@ class Tools:
             if auth:
                 headers["Authorization"] = auth
         return headers
-
     def _retrieve_text_from_collection(self, query: str, collection_id: str, auth: dict) -> list[dict]:
         url = f"{self.valves.owui_base_url}/api/v1/retrieval/query/collection"
         payload = {
@@ -3566,7 +2107,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Retrieval failed: {e}")
             return []
-
     def _list_collection_files(self, collection_id: str, auth: dict) -> list[dict]:
         url = f"{self.valves.owui_base_url}/api/v1/knowledge/{collection_id}"
         try:
@@ -3593,42 +2133,29 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] List collection failed: {e}")
             return []
-
     def _local_upload_path(self, file_id: str) -> Optional[str]:
-        """Locate the OWUI-stored file on disk by file_id prefix.
-
-        Avoids calling OWUI's own HTTP API from within an async tool handler
-        (which deadlocks the event loop on large files).
-        """
         try:
             import os, glob
-            # Try each of the plausible uploads roots.
             roots = []
             try:
-                import open_webui  # type: ignore
+                import open_webui
                 pkg_dir = os.path.dirname(open_webui.__file__)
                 roots.append(os.path.join(pkg_dir, "data", "uploads"))
-            except Exception:
-                pass
+            except Exception: pass
             roots.append(os.path.expanduser("~/.local/share/uv/tools/open-webui/lib/python3.12/site-packages/open_webui/data/uploads"))
             for root in roots:
-                if not root or not os.path.isdir(root):
-                    continue
+                if not root or not os.path.isdir(root): continue
                 hits = glob.glob(os.path.join(root, f"{file_id}_*"))
-                if hits:
-                    return hits[0]
+                if hits: return hits[0]
             return None
         except Exception as e:
             print(f"[DocGen] local_upload_path failed for {file_id}: {e}")
             return None
-
     def _fetch_file_metadata(self, file_id: str, auth: dict) -> Optional[dict]:
-        # Prefer direct disk lookup — avoids self-request deadlock.
         local = self._local_upload_path(file_id)
         if local:
             import os
             fname = os.path.basename(local)
-            # OWUI format is "<uuid>_<original filename>" — strip the uuid_ prefix.
             if fname.startswith(f"{file_id}_"):
                 fname = fname[len(file_id) + 1:]
             return {"name": fname, "id": file_id}
@@ -3644,14 +2171,11 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] File metadata fetch failed for {file_id}: {e}")
             return None
-
     def _fetch_file_bytes(self, file_id: str, auth: dict) -> Optional[bytes]:
-        # Prefer direct disk lookup — avoids self-request deadlock.
         local = self._local_upload_path(file_id)
         if local:
             try:
-                with open(local, "rb") as fh:
-                    return fh.read()
+                with open(local, "rb") as fh: return fh.read()
             except Exception as e:
                 print(f"[DocGen] local file read failed for {file_id}: {e}")
         url = f"{self.valves.owui_base_url}/api/v1/files/{file_id}/content"
@@ -3662,24 +2186,14 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] File bytes fetch failed for {file_id}: {e}")
             return None
-
     def _extract_one_attachment(self, fid: str, auth: dict) -> tuple[list[dict], list[dict]]:
-        """Fetch + extract text & images for one attachment. Cached by file hash.
-
-        Returns (text_chunks, images). Designed to be called concurrently from
-        ThreadPoolExecutor — network/disk I/O + CPU-bound decode both release
-        the GIL (requests, Pillow, PyMuPDF, zipfile).
-        """
         try:
             meta = self._fetch_file_metadata(fid, auth)
-            if not meta:
-                return [], []
+            if not meta: return [], []
             fbytes = self._fetch_file_bytes(fid, auth)
-            if not fbytes:
-                return [], []
+            if not fbytes: return [], []
             cached = _EXTRACT_CACHE.get(fbytes)
-            if cached is not None:
-                return cached
+            if cached is not None: return cached
             src = {
                 "file_id": fid,
                 "source": meta.get("name", fid),
@@ -3693,15 +2207,11 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] _extract_one_attachment({fid}) failed: {e}")
             return [], []
-
     def _extract_attachments_parallel(self, file_ids: list[str], auth: dict,
                                       max_workers: int = 4) -> tuple[list[dict], list[dict]]:
-        """Parallel fan-out of _extract_one_attachment. 4× speedup on 4+ files."""
         all_text, all_images = [], []
-        if not file_ids:
-            return all_text, all_images
-        if len(file_ids) == 1:
-            return self._extract_one_attachment(file_ids[0], auth)
+        if not file_ids: return all_text, all_images
+        if len(file_ids) == 1: return self._extract_one_attachment(file_ids[0], auth)
         with ThreadPoolExecutor(max_workers=min(max_workers, len(file_ids))) as ex:
             futures = {ex.submit(self._extract_one_attachment, fid, auth): fid
                        for fid in file_ids}
@@ -3713,12 +2223,9 @@ class Tools:
                 except Exception as e:
                     print(f"[DocGen] parallel extract failed for {futures[fut]}: {e}")
         return all_text, all_images
-
     def _ingest_images_parallel(self, candidates: list[dict], max_workers: int = 6) -> list[dict]:
-        """Parallel download/ingest of web image candidates. 5-6× speedup."""
         out: list[dict] = []
-        if not candidates:
-            return out
+        if not candidates: return out
         with ThreadPoolExecutor(max_workers=min(max_workers, len(candidates))) as ex:
             futures = [ex.submit(self._ingest_remote_image, c["url"], c) for c in candidates]
             for fut in as_completed(futures):
@@ -3729,10 +2236,6 @@ class Tools:
                 except Exception as e:
                     print(f"[DocGen] parallel ingest failed: {e}")
         return out
-
-    # ══════════════════════════════════════════════════════════════════════
-    # COLLECTION EXTRACTION
-    # ══════════════════════════════════════════════════════════════════════
     def _extract_from_collection(self, text_chunks, collection_files, auth) -> list[dict]:
         all_images = []
         referenced_names = {c.get("source") for c in text_chunks}
@@ -3745,9 +2248,7 @@ class Tools:
                 if fbytes:
                     all_images.extend(self._extract_images_from_bytes(fbytes, f))
         return all_images
-
     def _extract_text_from_bytes(self, file_bytes: bytes, src: dict) -> list[dict]:
-        """Used for chat attachments (not indexed by OWUI)."""
         ext = src["ext"]
         chunks = []
         try:
@@ -3782,7 +2283,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Text extraction failed for {src['source']}: {e}")
         return chunks
-
     def _chunk_text(self, text: str, size: int = 1000, overlap: int = 200) -> list[str]:
         words = text.split()
         out, i = [], 0
@@ -3790,15 +2290,12 @@ class Tools:
             out.append(" ".join(words[i:i+size]))
             i += size - overlap
         return [c for c in out if len(c.strip()) > 50]
-
     def _extract_images_from_bytes(self, file_bytes: bytes, src: dict) -> list[dict]:
         ext = src["ext"]
         images: list[dict] = []
         try:
             if ext in PDF_EXT:
                 images.extend(self._extract_pdf_images(file_bytes, src))
-                # Also render each PDF page as a full-page image so text-heavy
-                # docs still produce useful visuals for the output.
                 images.extend(self._render_pdf_pages(file_bytes, src))
             elif ext in DOCX_EXT:
                 images.extend(self._extract_docx_images(file_bytes, src))
@@ -3815,8 +2312,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Image extraction dispatch failed: {e}")
         return images
-
-    # ── Page-render helpers (PPTX/DOCX → PDF → PNG per page) ──
     def _soffice_binary(self) -> Optional[str]:
         import os, shutil
         for cand in (
@@ -3826,15 +2321,11 @@ class Tools:
             shutil.which("soffice") or "",
             shutil.which("libreoffice") or "",
         ):
-            if cand and os.path.isfile(cand):
-                return cand
+            if cand and os.path.isfile(cand): return cand
         return None
-
     def _office_to_pdf(self, file_bytes: bytes, suffix: str) -> Optional[bytes]:
-        """Convert a PPTX/DOCX byte blob to PDF via headless LibreOffice."""
         soffice = self._soffice_binary()
-        if not soffice:
-            return None
+        if not soffice: return None
         import os, subprocess, tempfile, uuid
         with tempfile.TemporaryDirectory(prefix="docgen_") as td:
             in_path = os.path.join(td, f"in_{uuid.uuid4().hex}{suffix}")
@@ -3850,20 +2341,14 @@ class Tools:
             except Exception as e:
                 print(f"[DocGen] soffice conversion failed: {e}")
                 return None
-            # soffice names output <in-stem>.pdf
             pdf_path = os.path.splitext(in_path)[0] + ".pdf"
-            if not os.path.exists(pdf_path):
-                return None
-            with open(pdf_path, "rb") as fh:
-                return fh.read()
-
+            if not os.path.exists(pdf_path): return None
+            with open(pdf_path, "rb") as fh: return fh.read()
     def _render_pdf_pages(self, pdf_bytes: bytes, src: dict,
                           max_pages: int = 40, dpi: int = 110) -> list[dict]:
-        """Render each page of a PDF to PNG and store as an image candidate."""
         try:
-            import fitz  # PyMuPDF
-        except ImportError:
-            return []
+            import fitz
+        except ImportError: return []
         out: list[dict] = []
         try:
             probe = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -3873,7 +2358,6 @@ class Tools:
             print(f"[DocGen] PDF page render failed: {e}")
             return out
         zoom = dpi / 72.0
-
         def _render_one(i: int):
             try:
                 d = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -3895,182 +2379,20 @@ class Tools:
             except Exception as e:
                 print(f"[DocGen] page render p{i+1} failed: {e}")
                 return None
-
-        # PyMuPDF is not thread-safe across a shared Document, so each worker
-        # opens its own Document from the same bytes. Pixmap encode releases
-        # the GIL in PyMuPDF — real parallelism.
         with ThreadPoolExecutor(max_workers=min(4, n or 1)) as ex:
             for rec in ex.map(_render_one, range(n)):
                 if rec:
                     out.append(rec)
         out.sort(key=lambda r: r.get("metadata", {}).get("page", 0))
         return out
-
     def _render_office_pages(self, office_bytes: bytes, src: dict,
                              suffix: str) -> list[dict]:
-        """Page/slide rendering for PPTX/DOCX.
-
-        Order (pure-Python FIRST, LibreOffice only as fallback):
-          1. Pure-Python path (no external deps, works in locked-down IBM envs):
-             - PPTX: composite each slide via Pillow (_render_pptx_slides_pure_python).
-             - DOCX: no pure-Python layout engine available.
-          2. LibreOffice path (richer fidelity): PPTX/DOCX → PDF → page PNGs.
-             Used only if pure-Python yielded nothing.
-        """
-        # 1. Pure-Python first.
         if suffix.lower() == ".pptx":
             snaps = self._render_pptx_slides_pure_python(office_bytes, src)
-            if snaps:
-                return snaps
-        # 2. LibreOffice fallback.
+            if snaps: return snaps
         pdf = self._office_to_pdf(office_bytes, suffix)
-        if pdf:
-            return self._render_pdf_pages(pdf, src)
+        if pdf: return self._render_pdf_pages(pdf, src)
         return []
-
-    def _render_pptx_slides_pure_python(self, pptx_bytes: bytes, src: dict,
-                                        max_slides: int = 40,
-                                        width_px: int = 1280,
-                                        height_px: int = 720) -> list[dict]:
-        """Pure-Python PPTX slide snapshot (no LibreOffice required).
-
-        Composites each slide into a PNG: solid background + title text + any
-        embedded slide image tiled in. Low fidelity but guaranteed to work in
-        restricted IBM environments where soffice is not installed. Critical
-        for Transition project deliverables.
-        """
-        out: list[dict] = []
-        try:
-            from PIL import ImageDraw, ImageFont  # Pillow ships with OWUI
-        except Exception:
-            return out
-        try:
-            zf = zipfile.ZipFile(io.BytesIO(pptx_bytes))
-        except Exception as e:
-            print(f"[DocGen] PPTX snapshot zip open failed: {e}")
-            return out
-        names = zf.namelist()
-        slide_names = sorted(
-            [n for n in names if n.startswith("ppt/slides/slide") and n.endswith(".xml")],
-            key=lambda n: int(re.search(r"slide(\d+)\.xml", n).group(1)) if re.search(r"slide(\d+)\.xml", n) else 0,
-        )[:max_slides]
-        ns_a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
-
-        # Build a mapping of slide number -> candidate background image bytes.
-        def _slide_bg_image(slide_name: str) -> Optional[bytes]:
-            rels_name = slide_name.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels"
-            if rels_name not in names:
-                return None
-            try:
-                rels_xml = zf.read(rels_name).decode("utf-8", errors="ignore")
-            except Exception:
-                return None
-            # Relationship targets for media (e.g. ../media/image3.png)
-            targets = re.findall(r'Target="([^"]+media/[^"]+)"', rels_xml)
-            for t in targets:
-                # Normalise to ppt/media/<file>
-                tn = t.replace("../", "ppt/")
-                if tn in names:
-                    try:
-                        b = zf.read(tn)
-                        if len(b) > 5000:  # skip tiny logos
-                            return b
-                    except Exception:
-                        continue
-            return None
-
-        try:
-            font = ImageFont.load_default()
-        except Exception:
-            font = None
-
-        # Pre-read per-slide bytes under the zipfile lock (ZipFile is not
-        # thread-safe for concurrent reads), then render in parallel.
-        slide_jobs = []
-        for i, slide_name in enumerate(slide_names, start=1):
-            try:
-                slide_xml_bytes = zf.read(slide_name)
-            except Exception:
-                slide_xml_bytes = b""
-            bg_bytes = _slide_bg_image(slide_name)
-            slide_jobs.append((i, slide_xml_bytes, bg_bytes))
-
-        def _render_one(job):
-            i, slide_xml_bytes, bg = job
-            try:
-                # Light theme: white body + IBM-blue accents. Prevents the
-                # "all-black rectangle" that happened when a slide had no
-                # large embedded image and the navy fallback showed through.
-                canvas = Image.new("RGB", (width_px, height_px), (255, 255, 255))
-                draw = ImageDraw.Draw(canvas)
-                if bg:
-                    try:
-                        bgim = Image.open(io.BytesIO(bg)).convert("RGB")
-                        bgim.thumbnail((width_px, height_px - 140))
-                        bx = (width_px - bgim.size[0]) // 2
-                        by = 96 + ((height_px - 140 - bgim.size[1]) // 2)
-                        canvas.paste(bgim, (bx, by))
-                    except Exception:
-                        pass
-                try:
-                    root = ET.fromstring(slide_xml_bytes.decode("utf-8", errors="ignore"))
-                    texts = [t.text for t in root.iter(f"{ns_a}t") if t.text]
-                except Exception:
-                    texts = []
-                title = (texts[0] if texts else f"Slide {i}").strip()[:140]
-                body_lines = [t.strip() for t in texts[1:8] if t and t.strip()]
-                # IBM blue title band
-                draw.rectangle([0, 0, width_px, 80], fill=(15, 98, 254))
-                draw.text((28, 28), title, fill=(255, 255, 255), font=font)
-                # Bullet-style body below the band when no bg image
-                if not bg and body_lines:
-                    y = 110
-                    for line in body_lines[:10]:
-                        draw.text((40, y), "• " + line[:160], fill=(30, 40, 60), font=font)
-                        y += 34
-                        if y > height_px - 60:
-                            break
-                elif bg and body_lines:
-                    # Footer strip with first-bullet context
-                    draw.rectangle([0, height_px - 60, width_px, height_px], fill=(240, 243, 250))
-                    draw.text((28, height_px - 44), body_lines[0][:180], fill=(30, 40, 60), font=font)
-                # Source corner tag (subtle grey)
-                draw.text((width_px - 240, height_px - 22),
-                          f"{(src.get('source') or '')[:30]} · p{i}",
-                          fill=(140, 150, 170), font=font)
-                buf = io.BytesIO()
-                canvas.save(buf, format="PNG", optimize=True)
-                png = buf.getvalue()
-                img_id = f"slidesnap_{src.get('file_id','x')}_p{i}_{uuid.uuid4().hex[:6]}"
-                meta = {
-                    "source": src.get("source"),
-                    "doc_type": src.get("doc_type"),
-                    "page": i,
-                    "kind": "slide_snapshot",
-                    "caption": f"{src.get('source','')} — slide {i}: {title}",
-                }
-                _IMAGE_STORE.put(img_id, png, meta)
-                return {"id": img_id, "png_bytes": png, "metadata": meta,
-                        "caption": meta["caption"], "source": src.get("source"),
-                        "doc_type": src.get("doc_type")}
-            except Exception as e:
-                print(f"[DocGen] slide snapshot p{i} failed: {e}")
-                return None
-
-        # Pillow releases the GIL on encode/resize/paste — real parallelism.
-        with ThreadPoolExecutor(max_workers=min(4, len(slide_jobs) or 1)) as ex:
-            for rec in ex.map(_render_one, slide_jobs):
-                if rec:
-                    out.append(rec)
-        # Keep slides in page order regardless of completion order.
-        out.sort(key=lambda r: r.get("metadata", {}).get("page", 0))
-        try:
-            zf.close()
-        except Exception:
-            pass
-        return out
-
-    # ── PDF ──
     def _extract_pdf_images(self, pdf_bytes: bytes, src: dict) -> list[dict]:
         out = []
         if not HAS_FITZ:
@@ -4084,10 +2406,8 @@ class Tools:
                     try:
                         base = doc.extract_image(xref)
                         pil = Image.open(io.BytesIO(base["image"])).convert("RGB")
-                    except Exception:
-                        continue
-                    if not self._passes_filter(pil):
-                        continue
+                    except Exception: continue
+                    if not self._passes_filter(pil): continue
                     caption = self._pdf_caption(page, img)
                     context = page.get_text("text")[:800]
                     rec = self._store_image(pil, src, caption, context,
@@ -4096,7 +2416,6 @@ class Tools:
         finally:
             doc.close()
         return out
-
     def _pdf_caption(self, page, img) -> str:
         try:
             bbox = page.get_image_bbox(img)
@@ -4107,11 +2426,8 @@ class Tools:
             if above: return above[-1][4].strip().replace("\n", " ")
         except Exception: pass
         return ""
-
-    # ── DOCX ──
     def _extract_docx_images(self, docx_bytes: bytes, src: dict) -> list[dict]:
         out = []
-        # Filename-only junk filter (never run against paragraph text).
         fn_junk = re.compile(r"(logo|icon|bullet|divider|watermark|thumbnail)", re.I)
         try:
             with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zf:
@@ -4123,27 +2439,22 @@ class Tools:
                         if "image" in rel.get("Type", ""):
                             rel_map[rel.get("Id")] = rel.get("Target")
                 except Exception: pass
-
                 try:
                     doc_xml = zf.read("word/document.xml").decode("utf-8", "ignore")
                     doc_root = ET.fromstring(doc_xml)
-                except Exception:
-                    return out
-
+                except Exception: return out
                 paragraphs = []
                 for p in doc_root.iter(f"{NS_W}p"):
                     text = "".join(t.text or "" for t in p.iter(f"{NS_W}t"))
                     rids = [blip.get(f"{NS_R}embed") for blip in p.iter(f"{NS_A}blip") if blip.get(f"{NS_R}embed")]
                     paragraphs.append({"text": text.strip(), "rids": rids})
-
                 for p_idx, para in enumerate(paragraphs):
                     for rid in para["rids"]:
                         target = rel_map.get(rid)
                         if not target: continue
                         media_path = f"word/{target}" if not target.startswith("word/") else target
                         leaf = media_path.rsplit("/", 1)[-1]
-                        if fn_junk.search(leaf):
-                            continue
+                        if fn_junk.search(leaf): continue
                         try: blob = zf.read(media_path)
                         except KeyError:
                             try: blob = zf.read(target)
@@ -4151,25 +2462,21 @@ class Tools:
                         try: pil = Image.open(io.BytesIO(blob)).convert("RGB")
                         except Exception: continue
                         if not self._passes_filter(pil): continue
-
                         caption = para["text"]
                         if not caption:
                             for q in range(p_idx + 1, min(p_idx + 3, len(paragraphs))):
                                 if paragraphs[q]["text"]:
                                     caption = paragraphs[q]["text"]; break
-
                         ctx_parts = [paragraphs[q]["text"]
                                      for q in range(max(0, p_idx-2), min(len(paragraphs), p_idx+3))
                                      if paragraphs[q]["text"]]
                         context = " ".join(ctx_parts)[:800]
-
                         rec = self._store_image(pil, src, caption[:400], context,
                                                  f"paragraph {p_idx}", f"docx_{rid}")
                         if rec: out.append(rec)
         except Exception as e:
             print(f"[DocGen] DOCX image extraction error: {e}")
         return out
-
     def _docx_extract_text(self, docx_bytes: bytes) -> str:
         try:
             with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zf:
@@ -4179,30 +2486,13 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] DOCX text failed: {e}")
             return ""
-
-    # ── PPTX ──
     def _extract_pptx_images(self, pptx_bytes: bytes, src: dict) -> list[dict]:
-        """Extract embedded images from a PPTX deck.
-
-        Strategy:
-          1. Pass A — walk every slide's blips, pair each image with its slide
-             title + body text so ranking has real semantic context.
-          2. Pass B — sweep anything under ppt/media/* that Pass A missed
-             (images referenced only by masters/layouts/themes, or unused but
-             present). Captioned with the deck name so they still rank.
-          3. Junk filter runs on the media **filename** only — never on slide
-             text, since e.g. a slide titled "Header-less Observability" was
-             previously dropping its diagrams.
-        """
         out: list[dict] = []
         seen_media: set = set()
-        # Filename-only junk filter. Matches common chrome like logo.png,
-        # bullet-square.png, divider.svg — never false-positives on real content.
         fn_junk = re.compile(r"(logo|icon|bullet|divider|watermark|thumbnail)", re.I)
         try:
             with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as zf:
                 names = zf.namelist()
-                # Pass A: per-slide blips, with slide-title + body as context.
                 slide_files = sorted(
                     [n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)],
                     key=lambda n: int(re.search(r"slide(\d+)", n).group(1))
@@ -4211,13 +2501,10 @@ class Tools:
                     try:
                         slide_xml = zf.read(slide_name).decode("utf-8", "ignore")
                         slide_root = ET.fromstring(slide_xml)
-                    except Exception:
-                        continue
-
+                    except Exception: continue
                     texts = [t.text for t in slide_root.iter(f"{NS_A}t") if t.text]
                     slide_text = " | ".join(texts)[:800]
                     title = (texts[0] if texts else "").strip()
-
                     rels_name = slide_name.replace("ppt/slides/", "ppt/slides/_rels/").replace(".xml", ".xml.rels")
                     rel_map = {}
                     try:
@@ -4226,15 +2513,11 @@ class Tools:
                         for rel in rels_root.findall("{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"):
                             if "image" in rel.get("Type", ""):
                                 rel_map[rel.get("Id")] = rel.get("Target")
-                    except Exception:
-                        pass
-
+                    except Exception: pass
                     for shape_idx, blip in enumerate(slide_root.iter(f"{NS_A}blip")):
                         rid = blip.get(f"{NS_R}embed")
-                        if not rid or rid not in rel_map:
-                            continue
+                        if not rid or rid not in rel_map: continue
                         target = rel_map[rid]
-                        # Resolve relative path inside the PPTX zip.
                         if target.startswith("../"):
                             media_path = "ppt/" + target[3:]
                         elif target.startswith("/"):
@@ -4246,51 +2529,33 @@ class Tools:
                             match = next((n for n in names if n.endswith(leaf) and "media" in n), None)
                             if match:
                                 media_path = match
-                            else:
-                                continue
-                        # Junk filter on filename only.
-                        if fn_junk.search(media_path.rsplit("/", 1)[-1]):
-                            continue
-                        if media_path in seen_media:
-                            continue
+                            else: continue
+                        if fn_junk.search(media_path.rsplit("/", 1)[-1]): continue
+                        if media_path in seen_media: continue
                         seen_media.add(media_path)
                         try:
                             blob = zf.read(media_path)
                             pil = Image.open(io.BytesIO(blob)).convert("RGB")
-                        except Exception:
-                            continue
-                        if not self._passes_filter(pil):
-                            continue
-                        # Caption = slide title; context = full slide text so
-                        # ranking has real matchable tokens.
+                        except Exception: continue
+                        if not self._passes_filter(pil): continue
                         caption = title or (slide_text[:160]) or f"Slide {slide_idx+1}"
                         rec = self._store_image(pil, src, caption[:400], slide_text,
                                                  f"slide {slide_idx+1}",
                                                  f"slide{slide_idx}_{shape_idx}")
                         if rec:
                             out.append(rec)
-
-                # Pass B: sweep anything under ppt/media/ that Pass A skipped
-                # (masters/layouts/themes-only images, or orphans). These still
-                # often contain the most relevant diagrams for templated decks.
                 deck_name = (src.get("source") or "").rsplit(".", 1)[0]
                 for n in names:
-                    if not n.startswith("ppt/media/"):
-                        continue
-                    if n in seen_media:
-                        continue
+                    if not n.startswith("ppt/media/"): continue
+                    if n in seen_media: continue
                     leaf = n.rsplit("/", 1)[-1]
-                    if fn_junk.search(leaf):
-                        continue
-                    if not re.search(r"\.(png|jpe?g|webp|bmp|tiff?|gif)$", leaf, re.I):
-                        continue
+                    if fn_junk.search(leaf): continue
+                    if not re.search(r"\.(png|jpe?g|webp|bmp|tiff?|gif)$", leaf, re.I): continue
                     try:
                         blob = zf.read(n)
                         pil = Image.open(io.BytesIO(blob)).convert("RGB")
-                    except Exception:
-                        continue
-                    if not self._passes_filter(pil):
-                        continue
+                    except Exception: continue
+                    if not self._passes_filter(pil): continue
                     seen_media.add(n)
                     caption = f"{deck_name} — {leaf}"
                     rec = self._store_image(pil, src, caption[:400], deck_name,
@@ -4300,7 +2565,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] PPTX image extraction error: {e}")
         return out
-
     def _pptx_extract_text(self, pptx_bytes: bytes) -> str:
         try:
             with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as zf:
@@ -4317,8 +2581,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] PPTX text failed: {e}")
             return ""
-
-    # ── XLSX ──
     def _extract_xlsx_images(self, xlsx_bytes: bytes, src: dict) -> list[dict]:
         out = []
         if not HAS_XLSX: return out
@@ -4345,7 +2607,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] XLSX image extraction error: {e}")
         return out
-
     def _xlsx_extract_text(self, xlsx_bytes: bytes) -> str:
         try:
             wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
@@ -4361,8 +2622,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] XLSX text failed: {e}")
             return ""
-
-    # ── Standalone images ──
     def _ingest_standalone_image(self, img_bytes: bytes, src: dict) -> list[dict]:
         try: pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         except Exception as e:
@@ -4371,7 +2630,6 @@ class Tools:
         caption = self._humanize(src["source"].rsplit(".", 1)[0])
         rec = self._store_image(pil, src, caption, "", "standalone image", "standalone")
         return [rec] if rec else []
-
     def _ingest_svg_image(self, svg_bytes: bytes, src: dict) -> list[dict]:
         svg_text = svg_bytes.decode("utf-8", errors="ignore")[:2000]
         pil = None
@@ -4385,20 +2643,15 @@ class Tools:
         caption = self._humanize(src["source"].rsplit(".", 1)[0])
         rec = self._store_image(pil, src, caption, svg_text, "SVG", "svg")
         return [rec] if rec else []
-
     def _ingest_remote_image(self, url: str, cand: dict) -> Optional[dict]:
         try:
-            # Wikimedia requires a descriptive User-Agent (429 otherwise).
-            # Use the compliant UA for wikimedia hosts, generic UA elsewhere.
             host = urlparse(url).netloc.lower()
             if "wikimedia.org" in host or "wikipedia.org" in host:
                 ua = "IBM-DocGen/2.0 (https://ibm.com; IBM Consulting) python-requests"
             else:
                 ua = "Mozilla/5.0 (ibm-docgen)"
-            # Use the pooled session — reuses TCP/TLS connections across calls
             r = self._http.get(url, timeout=self.valves.web_image_fetch_timeout,
                                 headers={"User-Agent": ua, "Accept": "image/*,*/*"})
-            # On 429, trip the breaker for whichever image-source this host serves
             if r.status_code == 429:
                 if "wikimedia.org" in host or "wikipedia.org" in host:
                     self._breaker_trip("wikipedia"); self._breaker_trip("wikimedia")
@@ -4409,7 +2662,6 @@ class Tools:
             try: pil = Image.open(io.BytesIO(r.content)).convert("RGB")
             except Exception: return None
             if not self._passes_filter(pil): return None
-
             src = {
                 "source": cand.get("source_page") or urlparse(url).netloc,
                 "ext": "." + url.rsplit(".", 1)[-1].split("?")[0].lower() if "." in url else ".jpg",
@@ -4421,10 +2673,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Remote image failed for {url}: {e}")
             return None
-
-    # ══════════════════════════════════════════════════════════════════════
-    # STORAGE & RANKING
-    # ══════════════════════════════════════════════════════════════════════
     def _store_image(self, pil, src, caption, context, location, tag) -> Optional[dict]:
         pil = self._downscale(pil)
         buf = io.BytesIO()
@@ -4435,9 +2683,7 @@ class Tools:
             buf = io.BytesIO()
             pil.save(buf, format="PNG", optimize=True)
             png_bytes = buf.getvalue()
-            if len(png_bytes) > self.valves.max_image_bytes:
-                return None
-
+            if len(png_bytes) > self.valves.max_image_bytes: return None
         stem = (src.get("source", "unknown") or "unknown").rsplit(".", 1)[0]
         safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", stem)[:40]
         img_id = f"{safe_stem}_{tag}_{uuid.uuid4().hex[:8]}"
@@ -4452,58 +2698,40 @@ class Tools:
         }
         _IMAGE_STORE.put(img_id, png_bytes, metadata)
         return metadata
-
     def _downscale(self, pil):
         max_dim = 1600
         if pil.width > max_dim or pil.height > max_dim:
             pil = pil.copy()
             pil.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
         return pil
-
     def _passes_filter(self, pil):
-        if pil.width < self.valves.min_image_width or pil.height < self.valves.min_image_height:
-            return False
+        if pil.width < self.valves.min_image_width or pil.height < self.valves.min_image_height: return False
         aspect = pil.width / pil.height
-        if aspect > self.valves.max_image_aspect_ratio or aspect < 1/self.valves.max_image_aspect_ratio:
-            return False
+        if aspect > self.valves.max_image_aspect_ratio or aspect < 1/self.valves.max_image_aspect_ratio: return False
         return True
-
-    # ── Vision-model caption + re-rank (multimodal base model) ──
     def _png_thumbnail(self, png_bytes: bytes, max_px: int) -> bytes:
-        """Downscale a PNG so the longest edge <= max_px. RGB output for smaller payload."""
         try:
             im = Image.open(io.BytesIO(png_bytes))
             im.thumbnail((max_px, max_px))
             out = io.BytesIO()
             im.convert("RGB").save(out, format="PNG", optimize=True)
             return out.getvalue()
-        except Exception:
-            return png_bytes
-
+        except Exception: return png_bytes
     def _vision_rank_sync(self, query: str, images: list, auth: dict) -> list:
-        """Blocking helper: POST to OWUI chat completions with image inputs,
-        parse a JSON array of {idx, caption, score} back, and merge into images.
-        Returned list is re-ordered: vision-ranked picks first, then the rest.
-        """
-        if not self.valves.vision_rank_enabled or not images:
-            return images
+        if not self.valves.vision_rank_enabled or not images: return images
         max_n = max(1, int(self.valves.vision_rank_max_images))
         pick = images[:max_n]
         rest = images[max_n:]
-
         image_parts = []
         for i, img in enumerate(pick):
             png = img.get("png_bytes")
             if not png:
                 png = _IMAGE_STORE.get_bytes(img.get("id", "")) if img.get("id") else None
-            if not png:
-                continue
+            if not png: continue
             thumb = self._png_thumbnail(png, int(self.valves.vision_rank_thumb_px))
             b64 = base64.b64encode(thumb).decode("ascii")
             image_parts.append((i, b64))
-        if not image_parts:
-            return images
-
+        if not image_parts: return images
         instruction = (
             f'Query: "{query}"\n\n'
             f"You will see {len(image_parts)} numbered images. For EACH image, produce one entry:\n"
@@ -4518,7 +2746,6 @@ class Tools:
                 "type": "image_url",
                 "image_url": {"url": f"data:image/png;base64,{b64}"},
             })
-
         payload = {
             "model": self.valves.vision_rank_model,
             "messages": [{"role": "user", "content": content}],
@@ -4536,12 +2763,10 @@ class Tools:
             r.raise_for_status()
             data = r.json()
             text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            if isinstance(text, list):  # some providers return list of parts
+            if isinstance(text, list):
                 text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
-            # Strip any code fences the model may add (triple-backtick blocks).
-            _fence = chr(96) * 3  # avoid literal backticks in source
+            _fence = chr(96) * 3
             text = re.sub(_fence + r"(?:json)?|" + _fence, "", text, flags=re.I).strip()
-            # Best-effort: find the JSON array region.
             m = re.search(r"\[\s*\{.*\}\s*\]", text, flags=re.S)
             if m:
                 text = m.group(0)
@@ -4549,7 +2774,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] vision rank request failed: {e}")
             return images
-
         for entry in entries if isinstance(entries, list) else []:
             try:
                 i = int(entry.get("idx", -1))
@@ -4560,24 +2784,16 @@ class Tools:
                         pick[i]["caption"] = cap
                         pick[i]["vision_caption"] = cap
                     pick[i]["vision_score"] = max(0.0, min(10.0, score))
-            except Exception:
-                continue
-
+            except Exception: continue
         pick.sort(key=lambda x: x.get("vision_score", 0.0), reverse=True)
         return pick + rest
-
     async def _vision_rank_async(self, query: str, images: list, auth: dict) -> list:
-        """Run the blocking vision-rank call on a worker thread so the event loop
-        stays responsive (OWUI serves the chat-completions endpoint we're hitting).
-        """
-        if not self.valves.vision_rank_enabled or not images:
-            return images
+        if not self.valves.vision_rank_enabled or not images: return images
         try:
             return await asyncio.to_thread(self._vision_rank_sync, query, images, auth)
         except Exception as e:
             print(f"[DocGen] vision rank async failed: {e}")
             return images
-
     def _rank_images(self, query, images):
         q_tokens = set(re.findall(r"\w{3,}", query.lower()))
         scored = []
@@ -4591,19 +2807,13 @@ class Tools:
                     ".svg": 1.15, ".png": 1.0, ".jpg": 1.0, ".jpeg": 1.0, ".webp": 1.0
                     }.get(img.get("source_format", ""), 1.0)
             lex_score = (overlap + 0.5) * dbst * fbst
-            # Prefer real embedded images over fallback page/slide snapshots:
-            # snapshots are low-fidelity composites produced when no big embed
-            # image exists. Real embedded images (charts, diagrams) look better
-            # in the final DOCX/PPTX and should win ties.
             kind = (img.get("metadata", {}) or {}).get("kind") or img.get("kind")
             kind_penalty = 0.4 if kind in ("slide_snapshot", "page_render") else 1.0
-            # Vision score (0-10) dominates when present; lexical breaks ties.
             vscore = img.get("vision_score")
             composite = ((float(vscore) * 100.0 if vscore is not None else 0.0) + lex_score) * kind_penalty
             scored.append((composite, img))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [img for _, img in scored]
-
     def _rank_text(self, query, chunks):
         q_tokens = set(re.findall(r"\w{3,}", query.lower()))
         scored = []
@@ -4612,10 +2822,6 @@ class Tools:
             scored.append((len(q_tokens & tokens), c))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [c for _, c in scored]
-
-    # ══════════════════════════════════════════════════════════════════════
-    # WEB SEARCH
-    # ══════════════════════════════════════════════════════════════════════
     def _google_search_text(self, query, num=6):
         out = []
         try:
@@ -4633,7 +2839,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Google text search failed: {e}")
         return out
-
     def _google_search_images(self, query, num=10):
         out = []
         try:
@@ -4653,17 +2858,9 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Google image search failed: {e}")
         return out
-
-    # ── Keyless fallbacks: Wikipedia text + Wikimedia Commons images ──
     def _wikipedia_search_text(self, query, num=6):
-        """Free, keyless text search via Wikipedia REST API.
-
-        Fetches search snippets AND the first paragraph (extract) of each
-        matching article for richer context. Uses compliant UA.
-        """
         out = []
         try:
-            # Step 1: search for matching article titles
             r = self._http.get(
                 "https://en.wikipedia.org/w/api.php",
                 params={
@@ -4687,8 +2884,7 @@ class Tools:
                 title = page.get("title", "")
                 extract = (page.get("extract") or "").strip()
                 url = page.get("fullurl") or f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
-                if not extract:
-                    continue
+                if not extract: continue
                 out.append({
                     "content": f"{title}\n\n{extract}",
                     "source": "en.wikipedia.org",
@@ -4697,19 +2893,10 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Wikipedia text search failed: {e}")
         return out
-
-    # Wikimedia's User-Agent policy requires descriptive identification.
-    # https://meta.wikimedia.org/wiki/User-Agent_policy
     _WIKI_UA = "IBM-DocGen/2.1 (https://ibm.com; IBM Consulting) python-requests"
-
     def _wikipedia_lead_images(self, query, num=5):
-        """Query Wikipedia (en) for articles matching the query, return lead images
-        (pageimage + thumbnail). Highest relevance for landmarks/places/people.
-        Works whenever Wikipedia is reachable — independent of Commons & Google.
-        """
         out = []
         try:
-            # Step 1: search for matching articles
             r = requests.get(
                 "https://en.wikipedia.org/w/api.php",
                 params={
@@ -4717,7 +2904,7 @@ class Tools:
                     "generator": "search",
                     "gsrsearch": query,
                     "gsrlimit": max(1, min(num, 10)),
-                    "gsrnamespace": 0,  # article namespace
+                    "gsrnamespace": 0,
                     "prop": "pageimages|pageprops|info|extracts",
                     "piprop": "original|thumbnail",
                     "pithumbsize": 1200,
@@ -4731,17 +2918,14 @@ class Tools:
             )
             r.raise_for_status()
             pages = r.json().get("query", {}).get("pages", {})
-            # Sort by search rank (Wikipedia returns in search-relevance order via 'index')
             ordered = sorted(
                 pages.values(),
                 key=lambda p: p.get("index", 999),
             )
             for page in ordered:
-                # Prefer the full-resolution original, fall back to 1200px thumb
                 img = page.get("original") or page.get("thumbnail") or {}
                 url = img.get("source")
-                if not url:
-                    continue
+                if not url: continue
                 out.append({
                     "url": url,
                     "title": page.get("title", "")[:200],
@@ -4751,9 +2935,7 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Wikipedia lead-image search failed: {e}")
         return out
-
     def _wikimedia_search_images(self, query, num=10):
-        """Free, keyless image search via Wikimedia Commons API (no key required)."""
         out = []
         try:
             r = requests.get(
@@ -4761,7 +2943,7 @@ class Tools:
                 params={
                     "action": "query", "format": "json", "generator": "search",
                     "gsrsearch": f"filetype:bitmap {query}",
-                    "gsrnamespace": 6,  # File namespace
+                    "gsrnamespace": 6,
                     "gsrlimit": max(1, min(num, 20)),
                     "prop": "imageinfo",
                     "iiprop": "url|size|mime|extmetadata",
@@ -4775,16 +2957,11 @@ class Tools:
             for _, page in pages.items():
                 info = (page.get("imageinfo") or [{}])[0]
                 mime = info.get("mime", "")
-                if not mime.startswith("image/"):
-                    continue
-                # Skip SVG (rasterization is unreliable) and giant files
-                if mime == "image/svg+xml":
-                    continue
-                if info.get("size", 0) > 8_000_000:
-                    continue
+                if not mime.startswith("image/"): continue
+                if mime == "image/svg+xml": continue
+                if info.get("size", 0) > 8_000_000: continue
                 url = info.get("thumburl") or info.get("url", "")
-                if not url:
-                    continue
+                if not url: continue
                 meta = info.get("extmetadata", {})
                 title = page.get("title", "").replace("File:", "")
                 desc = (meta.get("ImageDescription", {}) or {}).get("value", "")
@@ -4798,58 +2975,12 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] Wikimedia image search failed: {e}")
         return out
-
     def _web_search_text(self, query, num=6):
-        """Text search with automatic fallback: Google (if keys) → Wikipedia."""
         if self.valves.google_api_key and self.valves.google_cx:
             results = self._google_search_text(query, num)
-            if results:
-                return results
+            if results: return results
         return self._wikipedia_search_text(query, num)
-
-    def _web_search_images(self, query, num=10):
-        """Image search with multi-source fallback. Reordered: reliable sources
-        first (Wikipedia/Wikimedia), DDG last (returns many bot-blocked hosts).
-        Candidates pre-filtered by host blocklist.
-          1. Google Programmable Search (if valves set)
-          2. Wikipedia article lead-images (upload.wikimedia.org — high relevance)
-          3. Wikimedia Commons file search
-          4. DuckDuckGo Images (LAST — has many 10s-timeout hosts)
-        """
-        def _ok(results):
-            return self._prefilter_candidates(results) if results else results
-        if self.valves.google_api_key and self.valves.google_cx:
-            results = _ok(self._google_search_images(query, num))
-            if results:
-                return results
-        try:
-            wiki_results = _ok(self._wikipedia_lead_images(query, num=min(num, 5)))
-            if wiki_results:
-                return wiki_results
-        except Exception as e:
-            print(f"[DocGen] Wikipedia lead-image lookup failed: {e}")
-        try:
-            wmc_results = _ok(self._wikimedia_search_images(query, num))
-            if wmc_results:
-                return wmc_results
-        except Exception as e:
-            print(f"[DocGen] Wikimedia Commons search failed: {e}")
-        try:
-            ddg_results = _ok(self._duckduckgo_search_images(query, num))
-            if ddg_results:
-                return ddg_results
-        except Exception as e:
-            print(f"[DocGen] DuckDuckGo image search failed: {e}")
-        return []
-
     def _duckduckgo_search_images(self, query, num=10):
-        """Keyless image search via DuckDuckGo's image endpoint.
-
-        DuckDuckGo Images returns results from across the web (including Google-
-        and Bing-indexed pages) with no API key. Two-step flow:
-          1. POST to duckduckgo.com to get a session token (vqd)
-          2. GET duckduckgo.com/i.js with the token for JSON image results
-        """
         out = []
         try:
             headers = {
@@ -4859,8 +2990,6 @@ class Tools:
             }
             sess = requests.Session()
             sess.headers.update(headers)
-
-            # Step 1: obtain the vqd token
             token_resp = sess.get(
                 "https://duckduckgo.com/",
                 params={"q": query, "iax": "images", "ia": "images"},
@@ -4869,14 +2998,11 @@ class Tools:
             token_resp.raise_for_status()
             m = re.search(r"vqd=[\"']?([\d-]+)[\"']?", token_resp.text)
             if not m:
-                # Newer DDG uses JSON-encoded vqd
                 m = re.search(r'"vqd":"([\d-]+)"', token_resp.text)
             if not m:
                 print(f"[DocGen] DuckDuckGo: no vqd token in response")
                 return out
             vqd = m.group(1)
-
-            # Step 2: fetch image JSON
             img_resp = sess.get(
                 "https://duckduckgo.com/i.js",
                 params={
@@ -4884,7 +3010,7 @@ class Tools:
                     "o": "json",
                     "q": query,
                     "vqd": vqd,
-                    "f": ",,,,,,",  # filter defaults
+                    "f": ",,,,,,",
                     "p": "1",
                 },
                 timeout=self.valves.request_timeout,
@@ -4894,11 +3020,8 @@ class Tools:
             results = data.get("results") or []
             for item in results[:max(1, min(num, 20))]:
                 url = item.get("image") or item.get("thumbnail")
-                if not url:
-                    continue
-                # Skip inline data URIs and huge files
-                if url.startswith("data:"):
-                    continue
+                if not url: continue
+                if url.startswith("data:"): continue
                 out.append({
                     "url": url,
                     "title": (item.get("title") or "")[:200],
@@ -4908,10 +3031,6 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] DuckDuckGo image search failed: {e}")
         return out
-
-    # ══════════════════════════════════════════════════════════════════════
-    # RESPONSE PACKAGING
-    # ══════════════════════════════════════════════════════════════════════
     def _package(self, query, text_chunks, images, source):
         return json.dumps({
             "source_mode": source,
@@ -4948,20 +3067,14 @@ class Tools:
                 "Then call assemble_document(session_id, format, title, client_name, sections_json)."
             ),
         }, indent=2)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # DOCX BUILDER — pure OOXML, embeds images inline
-    # ══════════════════════════════════════════════════════════════════════
     def _build_and_render_docx(self, session_id, title, client_name, sections, emitter):
-        doc_parts = []          # w:p / w:tbl XML
-        media_files = []        # (filename, bytes) embedded in zip
-        rel_entries = []        # relationship <Relationship> rows
-        chart_parts = []        # (part_name, xml_bytes) for word/charts/chartN.xml
-        chart_overrides = []    # Content_Types <Override> rows for charts
-
+        doc_parts = []
+        media_files = []
+        rel_entries = []
+        chart_parts = []
+        chart_overrides = []
         def esc(s):
             return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-
         def run_xml(text, size=22, bold=False, italic=False, color="161616"):
             return (
                 f'<w:r><w:rPr>'
@@ -4972,7 +3085,6 @@ class Tools:
                 f'{"<w:i/>" if italic else ""}'
                 f'</w:rPr><w:t xml:space="preserve">{esc(text)}</w:t></w:r>'
             )
-
         def para_xml(runs, align="left", after=120, before=0):
             return (
                 f'<w:p><w:pPr>'
@@ -4980,7 +3092,6 @@ class Tools:
                 f'<w:spacing w:after="{after}" w:before="{before}" w:line="360" w:lineRule="auto"/>'
                 f'</w:pPr>{runs}</w:p>'
             )
-
         def heading_xml(text, level=1, color="0F62FE"):
             sizes = {1: 40, 2: 32, 3: 26, 4: 22}
             sz = sizes.get(level, 22)
@@ -4988,7 +3099,6 @@ class Tools:
                 f'<w:p><w:pPr><w:spacing w:before="360" w:after="160"/></w:pPr>'
                 f'{run_xml(text, size=sz, bold=True, color=color)}</w:p>'
             )
-
         def table_xml(headers, rows, hdr_bg="0F62FE"):
             out = '<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>'
             for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
@@ -5014,9 +3124,7 @@ class Tools:
                 out += '</w:tr>'
             out += '</w:tbl>'
             return out
-
         def add_image_xml(png_bytes, width_px, height_px, caption=None):
-            # Register media file + relationship
             idx = len(media_files)
             fname = f"image{idx+1}.png"
             media_files.append((fname, png_bytes))
@@ -5026,13 +3134,10 @@ class Tools:
                 f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
                 f'Target="media/{fname}"/>'
             )
-
-            # EMU sizing (914400 EMU = 1 inch, ~9525 EMU per pixel at 96 DPI)
             display_px = 500
             aspect = height_px / width_px if width_px else 0.65
             w_emu = int(display_px * 9525)
             h_emu = int(w_emu * aspect)
-
             doc_parts.append(
                 '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="240" w:after="60"/></w:pPr>'
                 '<w:r><w:drawing>'
@@ -5057,12 +3162,7 @@ class Tools:
             if caption:
                 cap_run = run_xml(f"Figure — {caption}", size=18, italic=True, color="525252")
                 doc_parts.append(para_xml(cap_run, align="center", after=240))
-
         def add_chart_xml(spec, caption=None):
-            """Embed a NATIVE OOXML chart (bar/pie/line) in this DOCX.
-            Writes word/charts/chartN.xml, adds rels + Content_Types, and
-            emits a <w:drawing> referencing <c:chart r:id="..."/>.
-            """
             chart_idx = len(chart_parts) + 1
             chart_xml_bytes = self._ooxml_chart_part_xml(spec)
             chart_parts.append((f"word/charts/chart{chart_idx}.xml", chart_xml_bytes))
@@ -5076,7 +3176,6 @@ class Tools:
                 f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" '
                 f'Target="charts/chart{chart_idx}.xml"/>'
             )
-            # 6 inches wide x 3.3 inches tall — comfortable chart size.
             w_emu = 5486400
             h_emu = 3017520
             doc_parts.append(
@@ -5098,8 +3197,6 @@ class Tools:
             if caption:
                 cap_run = run_xml(f"Chart — {caption}", size=18, italic=True, color="525252")
                 doc_parts.append(para_xml(cap_run, align="center", after=240))
-
-        # ── Cover page ──
         doc_parts.append(para_xml(run_xml(title, size=56, bold=True, color="0F62FE"),
                                    align="left", after=240, before=1200))
         doc_parts.append(para_xml(
@@ -5110,30 +3207,22 @@ class Tools:
             run_xml(time.strftime("%B %Y"), size=20, color="525252"),
             align="left", after=120
         ))
-        # Page break
         doc_parts.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
-
-        # ── Sections ──
         for idx, section in enumerate(sections, start=1):
             sec_title = section.get("title", f"Section {idx}")
             doc_parts.append(heading_xml(sec_title, level=1))
-
             for para in section.get("paragraphs", []) or []:
-                # Justified alignment for polished client-doc look
                 doc_parts.append(para_xml(run_xml(para, size=22), align="both"))
-
             bullets = section.get("bullets", []) or []
             for b in bullets:
                 doc_parts.append(
                     f'<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'
                     f'<w:ind w:left="360"/></w:pPr>{run_xml("• " + str(b), size=22)}</w:p>'
                 )
-
             if section.get("table"):
                 t = section["table"]
                 doc_parts.append(table_xml(t.get("headers", []), t.get("rows", [])))
-                doc_parts.append(para_xml("", after=120))  # spacer
-
+                doc_parts.append(para_xml("", after=120))
             if section.get("_img_bytes"):
                 add_image_xml(
                     section["_img_bytes"],
@@ -5146,28 +3235,20 @@ class Tools:
                     section["_chart_spec"],
                     section.get("image_caption") or section.get("title", ""),
                 )
-
         body_xml = "".join(doc_parts)
-
-        # Full document.xml
-        # ── IBM logo footer (every page, default) ──
         logo_png = self._get_ibm_logo_png()
         footer_ref_xml = ""
         footer_xml = None
         footer_rels_xml = None
         if logo_png:
             lw, lh = self._get_ibm_logo_dims()
-            # 1/5 of the previous 0.5-inch tall → ~0.1 inch tall, width by aspect.
-            # Requested: smaller, left-aligned IBM mark on every page.
-            # 0.5cm x 0.5cm per user policy v7 (reduced 50% from 1cm)
-            footer_h_emu = 144000  # 0.4 cm (reduced 20% further per user policy v8)
+            footer_h_emu = 144000
             footer_w_emu = int(footer_h_emu * (lw / max(lh, 1)))
             rel_entries.append(
                 '<Relationship Id="rIdFooter" '
                 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" '
                 'Target="footer1.xml"/>'
             )
-            # The footer has its own media rel file.
             footer_rels_xml = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -5176,8 +3257,6 @@ class Tools:
                 'Target="media/ibm_logo_black.png"/>'
                 '</Relationships>'
             )
-            # Footer content: left-aligned IBM logo + right-aligned page number.
-            # Use a tab-stop to push the page number to the right edge.
             footer_xml = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -5186,9 +3265,7 @@ class Tools:
                 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
                 'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
                 '<w:p>'
-                # Tab stops: logo on left, page number on right (at 9360 twentieths = 6.5 inch)
                 '<w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs></w:pPr>'
-                # IBM logo
                 '<w:r><w:drawing>'
                 f'<wp:inline distT="0" distB="0" distL="0" distR="0">'
                 f'<wp:extent cx="{footer_w_emu}" cy="{footer_h_emu}"/>'
@@ -5204,16 +3281,13 @@ class Tools:
                 f'<a:ext cx="{footer_w_emu}" cy="{footer_h_emu}"/></a:xfrm>'
                 '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
                 '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
-                # Inline "| IBM Consulting 2026" text after the logo
                 '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
                 '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
                 '<w:t xml:space="preserve">  |  IBM Consulting 2026</w:t></w:r>'
-                # Tab, then page number
                 '<w:r><w:tab/></w:r>'
                 '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
                 '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
                 '<w:t xml:space="preserve">Page </w:t></w:r>'
-                # w:fldSimple with PAGE field
                 '<w:fldSimple w:instr=" PAGE ">'
                 '<w:r><w:rPr><w:rFonts w:ascii="IBM Plex Sans" w:hAnsi="IBM Plex Sans"/>'
                 '<w:sz w:val="18"/><w:color w:val="525252"/></w:rPr>'
@@ -5229,9 +3303,7 @@ class Tools:
                 '</w:ftr>'
             )
             footer_ref_xml = '<w:footerReference w:type="default" r:id="rIdFooter"/>'
-            # Also ensure the logo image itself is written in word/media/.
             media_files.append(("ibm_logo_black.png", logo_png))
-
         doc_xml = (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -5246,8 +3318,6 @@ class Tools:
             '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
             '</w:sectPr></w:body></w:document>'
         )
-
-        # Content types
         footer_override = (
             '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
             if footer_xml else ''
@@ -5265,22 +3335,18 @@ class Tools:
             + "".join(chart_overrides)
             + '</Types>'
         )
-        # Package relationships
         rels_xml = (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
             '</Relationships>'
         )
-        # Document relationships (for images)
         doc_rels = (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             + "".join(rel_entries)
             + '</Relationships>'
         )
-
-        # Build the zip
         docx_buf = io.BytesIO()
         with zipfile.ZipFile(docx_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("[Content_Types].xml", ct_xml)
@@ -5290,32 +3356,22 @@ class Tools:
                 zf.writestr("word/footer1.xml", footer_xml)
                 zf.writestr("word/_rels/footer1.xml.rels", footer_rels_xml)
             zf.writestr("word/document.xml", doc_xml)
-            # Native OOXML chart parts
             for part_name, xml_bytes in chart_parts:
                 zf.writestr(part_name, xml_bytes)
             for fname, fbytes in media_files:
                 zf.writestr(f"word/media/{fname}", fbytes)
-
         docx_bytes = docx_buf.getvalue()
         docx_b64 = base64.b64encode(docx_bytes).decode()
         data_uri = f"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{docx_b64}"
-
-        # Build inline HTML preview
         return self._render_docx_preview(title, client_name, sections, data_uri)
-
     def _render_docx_preview(self, title, client_name, sections, data_uri):
         safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:50] or "document"
-
-        # IBM logo for the preview footer (inline data URI so it renders in the iframe)
         logo_png = self._get_ibm_logo_png()
         logo_img_tag = ""
         if logo_png:
             logo_b64 = base64.b64encode(logo_png).decode()
-            # 14px ≈ 0.5 cm at normal screen density (was 28px / 1 cm)
             logo_img_tag = f'<img src="data:image/png;base64,{logo_b64}" style="height:11px;width:auto;vertical-align:middle" alt="IBM"/>'
-
         def footer_html(page_num: int, total_pages: int) -> str:
-            """Reusable page footer — IBM logo + '| IBM Consulting 2026' left, Page N of M right."""
             return (
                 '<div style="position:absolute;bottom:24px;left:60px;right:60px;'
                 'display:flex;align-items:center;justify-content:space-between;'
@@ -5327,12 +3383,8 @@ class Tools:
                 f'<div>Page {page_num} of {total_pages}</div>'
                 '</div>'
             )
-
-        total_pages = 1 + len(sections)  # cover + content pages
-
-        # Build page HTML
+        total_pages = 1 + len(sections)
         page_parts = []
-        # Cover
         page_parts.append(
             f'<div class="pg" style="display:block;padding:80px 60px 80px;background:#fff;min-height:9in;position:relative">'
             f'<div style="font-size:36px;font-weight:700;color:{IBM_BLUE_60};margin-bottom:24px;font-family:\\"IBM Plex Sans\\",Calibri,sans-serif">{self._html_esc(title)}</div>'
@@ -5341,8 +3393,6 @@ class Tools:
             f'{footer_html(1, total_pages)}'
             f'</div>'
         )
-
-        # Sections
         for idx, section in enumerate(sections, start=1):
             parts = []
             parts.append(
@@ -5408,7 +3458,7 @@ class Tools:
                     )
                     + '</div>'
                 )
-            page_num = idx + 1  # cover is page 1, sections start at page 2
+            page_num = idx + 1
             page_parts.append(
                 f'<div class="pg" style="display:none;padding:60px 60px 80px;background:#fff;min-height:9in;'
                 f'position:relative;page-break-after:always">'
@@ -5416,19 +3466,18 @@ class Tools:
                 f'{footer_html(page_num, total_pages)}'
                 f'</div>'
             )
-
         total = len(page_parts)
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
-.dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#fff;display:flex;flex-direction:column}}
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:
+.dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:
 .tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
 .b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
 font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
-.bw{{background:#fff;color:{IBM_BLUE_70}}} .bg{{background:rgba(255,255,255,0.2);color:#fff}}
-.sn{{color:#fff;font-size:12px;min-width:90px;text-align:center}}
+.bw{{background:
+.sn{{color:
 .sp{{flex:1}}
 .sw{{background:{IBM_GRAY_10};padding:20px;overflow:auto;flex:1;min-height:0}}
 .pg{{max-width:8.5in;margin:0 auto 16px;box-shadow:0 2px 8px rgba(0,0,0,0.1);min-height:9in}}
@@ -5468,32 +3517,19 @@ var sw=document.querySelector(".sw");if(sw)sw.scrollTop=0}}
 document.addEventListener("keydown",function(e){{
 if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 </script></body></html>"""
-
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"})
-
-    # ══════════════════════════════════════════════════════════════════════
-    # XLSX BUILDER — IBM-branded multi-sheet workbook via openpyxl
-    # ══════════════════════════════════════════════════════════════════════
     def _build_and_render_xlsx(self, session_id, title, client_name, sections, workbook_spec, emitter):
-        if not HAS_XLSX:
-            return ("❌ openpyxl is not installed in the Open WebUI Python environment. "
+        if not HAS_XLSX: return ("❌ openpyxl is not installed in the Open WebUI Python environment. "
                     "Install it with:\n"
                     "    /Users/pradeepbasavarajappa/.local/share/uv/tools/open-webui/bin/python -m pip install openpyxl\n"
                     "Then restart Open WebUI.")
-
-        # Derive sheet specs. Accept EITHER schema:
-        #   A) {title, headers:[...], rows, notes}
-        #   B) {sheet_name, columns:[{header,width}], rows, styles:{header_bg,header_fg,alt_row_bg}}
         sheets = []
         if workbook_spec and isinstance(workbook_spec, dict) and workbook_spec.get("sheets"):
-            # Hard cap: 10 sheets max (user policy v9)
             raw_sheets_list = workbook_spec["sheets"][: self.MAX_SHEETS_XLSX]
             if len(workbook_spec["sheets"]) > self.MAX_SHEETS_XLSX:
                 print(f"[DocGen] XLSX capped at {self.MAX_SHEETS_XLSX} sheets (was {len(workbook_spec['sheets'])}).")
             for sh in raw_sheets_list:
-                if not isinstance(sh, dict):
-                    continue
-                # Determine columns (with widths)
+                if not isinstance(sh, dict): continue
                 cols = []
                 if sh.get("columns") and isinstance(sh["columns"], list):
                     for col in sh["columns"]:
@@ -5518,8 +3554,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                     "styles": sh.get("styles") or {},
                 })
         else:
-            # Auto-derive from sections. Summary sheet + one sheet per section with a table,
-            # else a single sheet listing section titles + bullet summary.
             summary_rows = []
             for idx, s in enumerate(sections, start=1):
                 paras = s.get("paragraphs") or []
@@ -5543,7 +3577,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             })
             for idx, s in enumerate(sections, start=1):
                 sec_title = s.get("title", f"Section {idx}")
-                # If the section has an explicit table, use it
                 tbl = s.get("table") or None
                 if tbl and tbl.get("headers") and tbl.get("rows"):
                     cols = [{"header": str(h), "width": None} for h in tbl["headers"]]
@@ -5556,7 +3589,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                         "styles": {},
                     })
                 else:
-                    # Flatten paragraphs + bullets into a 2-col sheet
                     rows = []
                     for p in s.get("paragraphs") or []:
                         rows.append(["Paragraph", p])
@@ -5572,29 +3604,21 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                         "notes": sec_title,
                         "styles": {},
                     })
-
-        # Build workbook
         wb = Workbook()
-        # Remove default sheet
         default = wb.active
         wb.remove(default)
-
-        # RAG + gantt block support (ported from Inline_Visualizer_v5)
         GANTT_BLOCKS = frozenset("\u2588\u2593\u2592\u2591\u25a0\u25aa\u25fc\u2b1b")
         RAG_MAP = {"RED": "DA1E28", "AMBER": "F1C21B", "GREEN": "24A148",
                    "RAG:RED": "DA1E28", "RAG:AMBER": "F1C21B", "RAG:GREEN": "24A148"}
-
         note_font = Font(name="IBM Plex Sans", size=10, italic=True, color="525252")
         thin = Side(border_style="thin", color="CCCCCC")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
         wrap = Alignment(wrap_text=True, vertical="top")
-
         used_names = set()
         for sh in sheets:
             name = self._unique_sheet_name(sh["title"], used_names)
             used_names.add(name)
             ws = wb.create_sheet(title=name)
-
             cols = sh.get("columns") or [{"header": h, "width": None} for h in sh.get("headers", [])]
             headers = [c["header"] for c in cols]
             col_count = max(1, len(headers))
@@ -5602,29 +3626,22 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             hdr_bg = (styles.get("header_bg") or "#0F62FE").lstrip("#")
             hdr_fg = (styles.get("header_fg") or "#FFFFFF").lstrip("#")
             alt_bg = (styles.get("alt_row_bg") or "#F4F4F4").lstrip("#")
-
             hdr_fill = PatternFill(start_color=hdr_bg, end_color=hdr_bg, fill_type="solid")
             hdr_font = Font(name="IBM Plex Sans", size=11, bold=True, color=hdr_fg)
             body_font = Font(name="IBM Plex Sans", size=11, color="161616")
             alt_fill = PatternFill(start_color=alt_bg, end_color=alt_bg, fill_type="solid")
-
             row_cursor = 1
-            # Title row (merged)
             ws.cell(row=row_cursor, column=1, value=str(sh["title"]))
             ws.cell(row=row_cursor, column=1).font = Font(name="IBM Plex Sans", size=16, bold=True, color="0F62FE")
             if col_count > 1:
                 ws.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=col_count)
             ws.row_dimensions[row_cursor].height = 26
             row_cursor += 1
-
-            # Subtitle
             ws.cell(row=row_cursor, column=1, value=f"IBM Consulting  |  Prepared for {client_name}")
             ws.cell(row=row_cursor, column=1).font = note_font
             if col_count > 1:
                 ws.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=col_count)
             row_cursor += 2
-
-            # Headers
             hdr_row = row_cursor
             for ci, h in enumerate(headers, start=1):
                 c = ws.cell(row=hdr_row, column=ci, value=str(h))
@@ -5634,10 +3651,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 c.border = border
             ws.row_dimensions[hdr_row].height = 28
             row_cursor += 1
-
             first_data_row = row_cursor
-
-            # Body rows with RAG + gantt block detection
             for ri, row in enumerate(sh["rows"]):
                 r = row_cursor + ri
                 is_alt = ri % 2 == 1
@@ -5645,15 +3659,12 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                     val = row[ci] if ci < len(row) else ""
                     cell_str = str(val) if val is not None else ""
                     stripped_upper = cell_str.strip().upper()
-
                     is_gantt = bool(cell_str.strip()) and all(ch in GANTT_BLOCKS for ch in cell_str.strip())
                     rag_key = stripped_upper if stripped_upper in RAG_MAP else None
-
                     c = ws.cell(row=r, column=ci + 1)
                     c.border = border
                     c.font = body_font
                     c.alignment = wrap
-
                     if is_gantt:
                         c.value = ""
                         c.fill = PatternFill(start_color="24A148", end_color="24A148", fill_type="solid")
@@ -5663,7 +3674,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                         c.font = Font(name="IBM Plex Sans", size=11, bold=True, color="FFFFFF")
                         c.alignment = Alignment(horizontal="center", vertical="center")
                     else:
-                        # Auto-coerce pure numeric strings
                         coerced = val
                         if isinstance(val, str):
                             s2 = val.strip()
@@ -5676,18 +3686,13 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                         c.value = coerced
                         if is_alt:
                             c.fill = alt_fill
-
             last_data_row = row_cursor + max(0, len(sh["rows"]) - 1)
-
-            # Notes line under the table
             if sh.get("notes"):
                 notes_row = last_data_row + 2
                 ws.cell(row=notes_row, column=1, value=str(sh["notes"]))
                 ws.cell(row=notes_row, column=1).font = note_font
                 if col_count > 1:
                     ws.merge_cells(start_row=notes_row, start_column=1, end_row=notes_row, end_column=col_count)
-
-            # Column widths — use explicit spec if given, else auto-size
             for ci in range(1, col_count + 1):
                 letter = get_column_letter(ci)
                 spec_w = cols[ci - 1].get("width") if ci - 1 < len(cols) else None
@@ -5702,130 +3707,81 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                             cell_str = str(row[ci - 1]) if row[ci - 1] is not None else ""
                             max_len = max(max_len, min(60, len(cell_str)))
                     ws.column_dimensions[letter].width = min(60, max(12, int(max_len * 1.1)))
-
-            # Freeze header + auto-filter
             ws.freeze_panes = ws.cell(row=first_data_row, column=1).coordinate
             if col_count > 0 and len(sh["rows"]) > 0:
                 last_col_letter = get_column_letter(col_count)
                 ws.auto_filter.ref = f"A{hdr_row}:{last_col_letter}{last_data_row}"
-
-        # Ensure at least one sheet
         if not wb.sheetnames:
             ws = wb.create_sheet(title="Sheet1")
             ws["A1"] = title
             ws["A2"] = f"Prepared for {client_name}"
-
-        # IBM logo (1cm × 1cm) — top-left of every sheet; sheet title + page label right.
         try:
             from openpyxl.drawing.image import Image as _XLImg
             logo_png = self._get_ibm_logo_png()
             if logo_png:
                 for sheet_idx, sn in enumerate(wb.sheetnames, start=1):
                     ws = wb[sn]
-                    # Write logo to a temp BytesIO path for openpyxl
                     try:
                         img_buf = io.BytesIO(logo_png)
-                        img_buf.name = "ibm_logo.png"  # openpyxl sniffs extension
+                        img_buf.name = "ibm_logo.png"
                         xlimg = _XLImg(img_buf)
-                        # 1 cm ≈ 37.8 px at 96 DPI
                         xlimg.width = 38
                         xlimg.height = 38
                         xlimg.anchor = "A1"
                         ws.add_image(xlimg)
                     except Exception as e:
                         print(f"[DocGen] XLSX logo insert failed for '{sn}': {e}")
-                    # Sheet page number label in the top-right of the sheet view (header-ish row)
                     try:
-                        # Put "Sheet N / M — <title>" in header row Z1 so it's visible when scrolling
                         from openpyxl.styles import Font as _XLFont
                         total = len(wb.sheetnames)
                         label_cell = ws.cell(row=1, column=26, value=f"Sheet {sheet_idx} / {total}")
                         label_cell.font = _XLFont(name="IBM Plex Sans", size=9, italic=True, color="525252")
                         label_cell.alignment = __import__("openpyxl").styles.Alignment(horizontal="right")
-                    except Exception:
-                        pass
+                    except Exception: pass
         except Exception as e:
             print(f"[DocGen] XLSX logo feature failed: {e}")
-
-        # Serialize
         buf = io.BytesIO()
         wb.save(buf)
         xlsx_bytes = buf.getvalue()
-
         b64 = base64.b64encode(xlsx_bytes).decode()
         data_uri = (
             "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + b64
         )
-
         return self._render_xlsx_preview(title, client_name, sheets, data_uri)
-
-    # Hard content caps (2026-04-19 user policy v9):
-    #   PPTX: 100 words/slide, max 15 content slides (+ cover)
-    #   DOCX: 300 words/page,  max 15 content pages (+ cover)
-    #   XLSX: 100 rows/sheet,  max 10 sheets
     MAX_WORDS_PPTX = 100
     MAX_WORDS_DOCX = 300
     MAX_ROWS_XLSX = 100
     MAX_SLIDES_PPTX = 15
     MAX_PAGES_DOCX = 15
     MAX_SHEETS_XLSX = 10
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Auto-chart from table data
-    # ──────────────────────────────────────────────────────────────────────
     def _table_has_numeric_column(self, table: dict) -> Optional[int]:
-        """Return the index of the FIRST non-header column whose values are all
-        numeric. Returns None if no such column. Used to decide if a section's
-        table is chartable."""
         if not isinstance(table, dict): return None
         rows = table.get("rows") or []
         headers = table.get("headers") or []
-        if not rows or not headers or len(headers) < 2:
-            return None
-        # Check each non-first column for all-numeric values
+        if not rows or not headers or len(headers) < 2: return None
         for col_idx in range(1, len(headers)):
             numeric_count = 0
             for row in rows:
                 if col_idx >= len(row): continue
                 v = row[col_idx]
                 try:
-                    # Strip currency/percent symbols + commas
                     s = str(v).strip().replace(",", "").replace("$", "").replace("%", "").replace("₹", "").replace("€", "")
                     float(s)
                     numeric_count += 1
-                except (ValueError, TypeError):
-                    pass
-            if numeric_count >= max(2, int(len(rows) * 0.7)):
-                return col_idx
+                except (ValueError, TypeError): pass
+            if numeric_count >= max(2, int(len(rows) * 0.7)): return col_idx
         return None
-
-    # IBM Carbon categorical palette — 9 distinct colors (used by native OOXML + SVG)
     _CHART_PALETTE = ["0F62FE", "8A3FFC", "007D79", "FA4D56", "FF832B",
                       "24A148", "4589FF", "D02670", "161616"]
-
     def _chart_spec_from_table(self, table: dict, section_title: str = "",
                                 chart_type: str = "auto") -> Optional[dict]:
-        """Extract a chart specification (labels, values, type, title) from a
-        numeric-column table. Returns None if the table isn't chartable.
-
-        Pure-Python dict, zero external libraries. The caller
-        decides whether to render as OOXML (native Office chart) or inline
-        SVG (for HTML preview).
-
-        Returned shape:
-            {"type": "bar"|"pie"|"line",
-             "title": str, "labels": [str], "values": [float],
-             "x_label": str, "y_label": str, "series_name": str}
-        """
         numeric_col_idx = self._table_has_numeric_column(table)
-        if numeric_col_idx is None:
-            return None
+        if numeric_col_idx is None: return None
         headers = table.get("headers") or []
         rows = table.get("rows") or []
         labels, values = [], []
         for row in rows[:20]:
-            if len(row) <= numeric_col_idx:
-                continue
+            if len(row) <= numeric_col_idx: continue
             label = str(row[0])[:22]
             try:
                 s = (str(row[numeric_col_idx]).strip()
@@ -5833,12 +3789,8 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                      .replace("%", "").replace("₹", "").replace("€", ""))
                 values.append(float(s))
                 labels.append(label)
-            except (ValueError, TypeError):
-                continue
-        if len(values) < 2:
-            return None
-
-        # Auto-route chart type
+            except (ValueError, TypeError): continue
+        if len(values) < 2: return None
         if chart_type == "auto":
             col_header = (headers[numeric_col_idx] if numeric_col_idx < len(headers) else "").lower()
             is_share = any(k in col_header for k in
@@ -5855,7 +3807,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 chart_type = "pie"
             else:
                 chart_type = "bar"
-
         y_label = headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value"
         x_label = headers[0] if headers else ""
         chart_title = (section_title or y_label or "Chart")[:60]
@@ -5868,23 +3819,12 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             "y_label": y_label,
             "series_name": y_label,
         }
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Native OOXML chart (chartN.xml) — bar / pie / line
-    # ──────────────────────────────────────────────────────────────────────
     @staticmethod
     def _xml_escape(s) -> str:
         s = str(s)
         return (s.replace("&", "&amp;").replace("<", "&lt;")
                  .replace(">", "&gt;").replace('"', "&quot;"))
-
     def _ooxml_chart_part_xml(self, spec: dict) -> bytes:
-        """Generate a chartN.xml DrawingML chart part from a spec.
-
-        Returns a complete <c:chartSpace> document. The caller is responsible
-        for writing the bytes to `word/charts/chartN.xml` / `ppt/charts/chartN.xml`
-        / `xl/charts/chartN.xml` and wiring up rels + Content_Types.
-        """
         ctype = spec.get("type", "bar")
         labels = [self._xml_escape(l) for l in spec.get("labels", [])]
         values = list(spec.get("values", []))
@@ -5894,8 +3834,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         y_label = self._xml_escape(spec.get("y_label", ""))
         series_name = self._xml_escape(spec.get("series_name", "Series 1"))
         palette = self._CHART_PALETTE
-
-        # Build <c:cat> (string category axis) — shared by bar / line / pie.
         cat_pts = "".join(
             f'<c:pt idx="{i}"><c:v>{labels[i]}</c:v></c:pt>' for i in range(n)
         )
@@ -5904,7 +3842,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             f'<c:strCache><c:ptCount val="{n}"/>{cat_pts}</c:strCache>'
             f'</c:strRef></c:cat>'
         )
-        # Build <c:val> (numeric value axis).
         val_pts = "".join(
             f'<c:pt idx="{i}"><c:v>{values[i]}</c:v></c:pt>' for i in range(n)
         )
@@ -5914,7 +3851,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             f'<c:ptCount val="{n}"/>{val_pts}</c:numCache>'
             f'</c:numRef></c:val>'
         )
-
         title_xml = (
             '<c:title><c:tx><c:rich>'
             '<a:bodyPr rot="0" spcFirstLastPara="1" vertOverflow="ellipsis" wrap="square" anchor="ctr" anchorCtr="1"/>'
@@ -5927,9 +3863,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             f'<a:t>{title}</a:t></a:r></a:p></c:rich></c:tx>'
             '<c:overlay val="0"/></c:title>'
         )
-
         if ctype == "pie":
-            # dPt colour per slice for IBM Carbon palette.
             dpts = "".join(
                 f'<c:dPt><c:idx val="{i}"/><c:bubble3D val="0"/>'
                 f'<c:spPr><a:solidFill><a:srgbClr val="{palette[i % len(palette)]}"/>'
@@ -5977,7 +3911,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 + '</c:plotArea>'
             )
         else:
-            # bar (clustered column)
             dpts = "".join(
                 f'<c:dPt><c:idx val="{i}"/><c:invertIfNegative val="0"/><c:bubble3D val="0"/>'
                 f'<c:spPr><a:solidFill><a:srgbClr val="{palette[i % len(palette)]}"/>'
@@ -5999,7 +3932,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 + self._ooxml_cat_val_axes(x_label, y_label)
                 + '</c:plotArea>'
             )
-
         chart_xml = (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
             '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
@@ -6017,10 +3949,8 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             '</c:chartSpace>'
         )
         return chart_xml.encode("utf-8")
-
     @staticmethod
     def _ooxml_cat_val_axes(x_label: str, y_label: str) -> str:
-        """Category + Value axis XML shared by bar / line charts."""
         return (
             '<c:catAx><c:axId val="1"/>'
             '<c:scaling><c:orientation val="minMax"/></c:scaling>'
@@ -6050,22 +3980,14 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             '<c:crossAx val="1"/><c:crosses val="autoZero"/>'
             '<c:crossBetween val="between"/></c:valAx>'
         )
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Pure-Python SVG chart (HTML iframe preview only — zero dependencies)
-    # ──────────────────────────────────────────────────────────────────────
     def _svg_chart_from_spec(self, spec: dict, width: int = 720, height: int = 360) -> str:
-        """Render an inline SVG chart (bar/pie/line) from a chart spec.
-        Used in the HTML iframe preview. Pure string math, no libraries."""
         ctype = spec.get("type", "bar")
         labels = spec.get("labels", []) or []
         values = spec.get("values", []) or []
         title = self._xml_escape(spec.get("title", ""))
         palette = self._CHART_PALETTE
-        if not values:
-            return ""
+        if not values: return ""
         esc = self._xml_escape
-
         if ctype == "pie":
             import math
             cx, cy, r = width // 2, height // 2 + 10, min(width, height) // 2 - 40
@@ -6084,7 +4006,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                     f'<path d="M{cx},{cy} L{x1:.1f},{y1:.1f} A{r},{r} 0 {large} 1 {x2:.1f},{y2:.1f} Z" '
                     f'fill="#{color}" stroke="#FFFFFF" stroke-width="1.5"/>'
                 )
-                # Label
                 mid = (angle0 + angle1) / 2
                 tx, ty = cx + (r * 0.62) * math.cos(mid), cy + (r * 0.62) * math.sin(mid)
                 slices.append(
@@ -6105,7 +4026,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 ly += 20
             body = "".join(slices) + legend_xml
         elif ctype == "line":
-            # Area+line
             pad_l, pad_r, pad_t, pad_b = 60, 30, 50, 50
             w, h = width - pad_l - pad_r, height - pad_t - pad_b
             vmax = max(values) or 1
@@ -6145,7 +4065,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 + "".join(x_labels)
             )
         else:
-            # Bar
             pad_l, pad_r, pad_t, pad_b = 60, 30, 50, 60
             w, h = width - pad_l - pad_r, height - pad_t - pad_b
             vmax = max(values) or 1
@@ -6177,7 +4096,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                     f'font-size="10" fill="#525252" font-family="IBM Plex Sans, Arial">{esc(lab)[:12]}</text>'
                 )
             body = "".join(axis_y) + "".join(bars)
-
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
             f'width="100%" style="max-width:{width}px;background:#FFFFFF;">'
@@ -6185,17 +4103,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             f'font-weight="700" fill="#161616" font-family="IBM Plex Sans, Arial">{title}</text>'
             f'{body}</svg>'
         )
-
     def _autoinject_charts(self, sections: list) -> list:
-        """For any section with a numeric table AND no existing image, attach a
-        `_chart_spec` dict. Downstream builders (DOCX / PPTX / XLSX) emit the
-        chart as a NATIVE OOXML chart part (not a PNG). HTML preview renders
-        the same spec as inline SVG.
-
-        Respects a per-section chart_type field: 'bar' | 'pie' | 'line' | 'auto'.
-        If the section has 'chart_data' (alternative to table for pure chart
-        intent), use that directly; otherwise derive from the table.
-        """
         out = []
         for s in sections:
             if not isinstance(s, dict):
@@ -6212,30 +4120,18 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                     ns["image_caption"] = ns.get("image_caption") or f"Chart — {ns.get('title','data')}"
             out.append(ns)
         return out
-
     _BULLET_NUMBER_PREFIX = re.compile(r'^\s*(?:\d{1,3}[\.\)\-:]|\d{2}\s|\u2022\s|[-\*]\s|[a-zA-Z][\.\)])\s*')
-
     def _strip_bullet_numbering(self, bullet: str) -> str:
-        """Strip '01 ', '1.', '1)', '- ', '* ', 'a)' and similar leading markers from
-        a bullet string. The renderer already supplies a bullet glyph; having numbers
-        inside the text too is ugly."""
-        if not isinstance(bullet, str):
-            return bullet
+        if not isinstance(bullet, str): return bullet
         cleaned = self._BULLET_NUMBER_PREFIX.sub('', bullet).strip()
         return cleaned or bullet
-
     def _enforce_content_caps(self, sections: list, fmt: str) -> list:
-        """Truncate each section's text/rows so the rendered output respects
-        the hard content caps. Pure defensive — the system prompt asks the LLM
-        to stay under, but we never exceed even if the LLM forgets.
-        """
         out = []
         if fmt == "pptx":
             limit = self.MAX_WORDS_PPTX
             for s in sections:
                 if not isinstance(s, dict): out.append(s); continue
                 ns = dict(s)
-                # Count words (excluding image caption / speaker notes — those are separate)
                 title = ns.get("title") or ""
                 paras = list(ns.get("paragraphs") or [])
                 bullets = [self._strip_bullet_numbering(b) for b in (ns.get("bullets") or [])]
@@ -6298,8 +4194,6 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 ns["bullets"] = new_bullets
                 out.append(ns)
         elif fmt == "xlsx":
-            # For XLSX we also cap any inline table inside a section at MAX_ROWS_XLSX rows.
-            # The main row cap is applied per-sheet in _build_and_render_xlsx too.
             limit = self.MAX_ROWS_XLSX
             for s in sections:
                 if not isinstance(s, dict): out.append(s); continue
@@ -6310,31 +4204,23 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                     if len(rows) > limit:
                         ns["table"] = {**tbl, "rows": rows[:limit]}
                 out.append(ns)
-        else:
-            return list(sections)
+        else: return list(sections)
         return out
-
     def _sanitize_sheet_name(self, name: str, idx: int = 0) -> str:
-        # Excel sheet names: ≤31 chars, no : \ / ? * [ ]
         cleaned = re.sub(r"[:\\/\?\*\[\]]", " ", str(name or "")).strip()
         if not cleaned:
             cleaned = f"Sheet{idx}"
         return cleaned[:31]
-
     def _unique_sheet_name(self, name: str, used: set) -> str:
         base = self._sanitize_sheet_name(name, 1)
-        if base not in used:
-            return base
+        if base not in used: return base
         i = 2
         while True:
             cand = f"{base[:28]} ({i})"
-            if cand not in used:
-                return cand
+            if cand not in used: return cand
             i += 1
-
     def _render_xlsx_preview(self, title, client_name, sheets, data_uri):
         safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:50] or "workbook"
-
         tab_buttons = []
         panels = []
         for i, sh in enumerate(sheets):
@@ -6344,12 +4230,9 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 f'<button class="tab{active}" onclick="showTab({i})" data-i="{i}">'
                 f'{self._html_esc(sh["title"])}</button>'
             )
-
-            # Build HTML table
             headers = sh.get("headers") or []
             rows = sh.get("rows") or []
             notes = sh.get("notes") or ""
-
             thead = ""
             if headers:
                 thead = "<tr>" + "".join(
@@ -6383,26 +4266,25 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 f'IBM Consulting  |  Prepared for {self._html_esc(client_name)}</div>'
                 f'{table_html}{note_html}</div>'
             )
-
         total = len(sheets)
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
-.wk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#fff;display:flex;flex-direction:column}}
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:
+.wk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:
 .tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
 .b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
-font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:#fff;color:{IBM_BLUE_70}}}
+font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block;background:
 .sp{{flex:1}}
-.title{{color:#fff;font-size:13px;font-weight:600}}
+.title{{color:
 .tabs{{display:flex;gap:2px;padding:8px 14px 0;background:{IBM_GRAY_10};flex-wrap:wrap;border-bottom:1px solid {IBM_GRAY_20};flex-shrink:0}}
 .tab{{border:1px solid {IBM_GRAY_20};border-bottom:none;border-radius:6px 6px 0 0;padding:8px 14px;
 font-size:12px;cursor:pointer;font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;
-background:#fff;color:{IBM_GRAY_70}}}
-.tab.active{{background:{IBM_BLUE_60};color:#fff;border-color:{IBM_BLUE_60}}}
+background:
+.tab.active{{background:{IBM_BLUE_60};color:
 .sw{{background:{IBM_GRAY_10};padding:20px;overflow:auto;flex:1;min-height:0}}
-.panel{{background:#fff;padding:24px;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.08);overflow-x:auto}}
+.panel{{background:
 </style></head><body>
 <div class="wk">
   <div class="tb">
@@ -6442,18 +4324,11 @@ function showTab(i){{
 }}
 </script></body></html>"""
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"})
-
-    # ══════════════════════════════════════════════════════════════════════
-    # PPTX BUILDER — pure OOXML with image embedding
-    # ══════════════════════════════════════════════════════════════════════
     def _build_and_render_pptx(self, session_id, title, client_name, sections, emitter):
-        # Slide dimensions in EMU (13.333" x 7.5" for 16:9)
         SLIDE_W_EMU = 12192000
         SLIDE_H_EMU = 6858000
-
         def esc(s):
             return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
         def txt_run(text, size=1800, bold=False, italic=False, color="161616"):
             b_attr = 'b="1" ' if bold else ''
             i_attr = 'i="1" ' if italic else ''
@@ -6464,7 +4339,6 @@ function showTab(i){{
                 f'<a:latin typeface="IBM Plex Sans"/>'
                 f'</a:rPr><a:t>{esc(text)}</a:t></a:r>'
             )
-
         def txt_box(x, y, w, h, text, size=1800, bold=False, color="161616", align="l"):
             return (
                 f'<p:sp>'
@@ -6477,7 +4351,6 @@ function showTab(i){{
                 + txt_run(text, size=size, bold=bold, color=color)
                 + '</a:p></p:txBody></p:sp>'
             )
-
         def bullet_box(x, y, w, h, bullets, size=1400):
             body = ""
             for b in bullets:
@@ -6492,7 +4365,6 @@ function showTab(i){{
                 f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>'
                 f'<p:txBody><a:bodyPr wrap="square" anchor="t"/><a:lstStyle/>{body}</p:txBody></p:sp>'
             )
-
         def solid_bg(color):
             return (
                 f'<p:sp><p:nvSpPr><p:cNvPr id="9999" name="bg"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
@@ -6500,7 +4372,6 @@ function showTab(i){{
                 f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
                 f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr></p:sp>'
             )
-
         def accent_bar():
             return (
                 f'<p:sp><p:nvSpPr><p:cNvPr id="9998" name="bar"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
@@ -6508,7 +4379,6 @@ function showTab(i){{
                 f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
                 f'<a:solidFill><a:srgbClr val="0F62FE"/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr></p:sp>'
             )
-
         def image_xml(rid, x, y, w_emu, h_emu):
             return (
                 f'<p:pic><p:nvPicPr><p:cNvPr id="{uuid.uuid4().int % 10000}" name="Image"/>'
@@ -6518,19 +4388,12 @@ function showTab(i){{
                 f'<p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{w_emu}" cy="{h_emu}"/></a:xfrm>'
                 f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
             )
-
-        # Build slides
         slides_xml = []
         slide_rels = []
-        media_files = []    # (filename, bytes)
-        chart_parts = []    # (part_name, xml_bytes) — ppt/charts/chartN.xml
-        chart_overrides = []  # Content_Types <Override> rows for charts
-
+        media_files = []
+        chart_parts = []
+        chart_overrides = []
         def chart_graphic_frame(spec, slide_rel_entries, x_emu, y_emu, w_emu, h_emu, shape_id):
-            """Emit a <p:graphicFrame> referencing a NATIVE OOXML chart part.
-            Also writes the chart XML part and registers Content_Types + rels.
-            Returns the graphicFrame XML string.
-            """
             chart_idx = len(chart_parts) + 1
             chart_xml_bytes = self._ooxml_chart_part_xml(spec)
             chart_parts.append((f"ppt/charts/chart{chart_idx}.xml", chart_xml_bytes))
@@ -6557,25 +4420,19 @@ function showTab(i){{
                 f'r:id="{rid}"/>'
                 '</a:graphicData></a:graphic></p:graphicFrame>'
             )
-
-        # ── IBM logo footer (added to every slide) ──
         logo_png = self._get_ibm_logo_png()
         logo_fname = None
         if logo_png:
             logo_fname = "ibm_logo_black.png"
             media_files.append((logo_fname, logo_png))
             lw, lh = self._get_ibm_logo_dims()
-            # 0.5cm x 0.5cm per user policy v7 (reduced 50% from 1cm)
-            logo_h_emu = 144000  # 0.4 cm (reduced 20% further per user policy v8)
+            logo_h_emu = 144000
             logo_w_emu = int(logo_h_emu * (lw / max(lh, 1)))
-            logo_x_emu = 228600  # 0.25in left margin
-            logo_y_emu = SLIDE_H_EMU - logo_h_emu - 114300  # 0.125in bottom margin
-
+            logo_x_emu = 228600
+            logo_y_emu = SLIDE_H_EMU - logo_h_emu - 114300
         def logo_shape_and_rel(slide_rel_entries: list) -> str:
-            """Append a logo image rel to slide_rel_entries and return the <p:pic> XML."""
-            if not logo_fname:
-                return ""
-            rid = f"rId{len(slide_rel_entries)+2}"  # rId1 is layout
+            if not logo_fname: return ""
+            rid = f"rId{len(slide_rel_entries)+2}"
             slide_rel_entries.append(
                 f'<Relationship Id="{rid}" '
                 f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
@@ -6589,8 +4446,6 @@ function showTab(i){{
                 f'<a:ext cx="{logo_w_emu}" cy="{logo_h_emu}"/></a:xfrm>'
                 f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
             )
-
-        # Slide 1: Cover
         cover_xml = (
             '<p:sp><p:nvSpPr><p:cNvPr id="1" name="CoverBG"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
             f'<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{SLIDE_W_EMU}" cy="{SLIDE_H_EMU}"/></a:xfrm>'
@@ -6602,17 +4457,12 @@ function showTab(i){{
             + txt_box(685800, 5486400, 10820400, 457200,
                       time.strftime("%B %Y"), size=1200, color="FFFFFF")
         )
-        # Every slide needs a relationship to the slideLayout (rId1) or PowerPoint
-        # flags the pptx as corrupt. Keep rId2+ for images on that slide.
         _layout_rel = (
             '<Relationship Id="rId1" '
             'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" '
             'Target="../slideLayouts/slideLayout1.xml"/>'
         )
-        # Cover keeps IBM blue background; skip logo here (black-on-blue unreadable).
         slides_xml.append(("slide1", cover_xml, [_layout_rel]))
-
-        # Content slides
         for idx, section in enumerate(sections, start=1):
             slide_num = idx + 1
             slide_rel_entries = [_layout_rel]
@@ -6623,20 +4473,14 @@ function showTab(i){{
                         section.get("title", f"Section {idx}"),
                         size=2600, bold=True, color="161616")
             )
-
             has_chart = bool(section.get("_chart_spec"))
             has_image = bool(section.get("_img_bytes")) or has_chart
-
-            # Paragraphs + bullets (text zone)
             text_x = 457200
             text_y = 1143000
             text_w = 5943600 if has_image else 11277600
             text_h = 5334000
-
             paras = section.get("paragraphs", []) or []
             bullets = section.get("bullets", []) or []
-
-            # Combine paragraphs and bullets into one text frame
             if paras or bullets:
                 body = ""
                 for p in paras:
@@ -6656,10 +4500,7 @@ function showTab(i){{
                     f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>'
                     f'<p:txBody><a:bodyPr wrap="square" anchor="t"/><a:lstStyle/>{body}</p:txBody></p:sp>'
                 )
-
-            # Chart (native OOXML) or image on the right
             if has_chart:
-                # Native OOXML chart: 5.1" x 3.8" on right half of slide
                 ch_x = 6629400
                 ch_y = 1143000
                 ch_w = 5105400
@@ -6684,8 +4525,6 @@ function showTab(i){{
                     f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
                     f'Target="../media/{fname}"/>'
                 )
-
-                # Sizing for right half
                 img_x = 6629400
                 img_y = 1143000
                 img_max_w = 5105400
@@ -6696,43 +4535,34 @@ function showTab(i){{
                 if img_h > img_max_h:
                     img_h = img_max_h
                     img_w = int(img_h / aspect)
-
                 shapes.append(image_xml(rid, img_x, img_y, img_w, img_h))
-
-                # Caption
                 if section.get("image_caption"):
                     shapes.append(
                         txt_box(img_x, img_y + img_h + 50000, img_w, 400000,
                                 f"Figure — {section['image_caption']}",
                                 size=900, color="525252")
                     )
-
-            # IBM logo footer — add last so it lays on top of everything else.
             logo_xml = logo_shape_and_rel(slide_rel_entries)
             if logo_xml:
                 shapes.append(logo_xml)
-            # Brand label " | IBM Consulting 2026" — placed right after the logo.
             if logo_fname:
-                label_x = logo_x_emu + logo_w_emu + 50800   # ~0.055in gap after logo
-                label_y = logo_y_emu - 15000                # tiny visual tweak to align with logo mid-line
-                label_w = 2400000                           # 2.6 inches wide is plenty
+                label_x = logo_x_emu + logo_w_emu + 50800
+                label_y = logo_y_emu - 15000
+                label_w = 2400000
                 label_h = logo_h_emu + 30000
                 shapes.append(txt_box(
                     label_x, label_y, label_w, label_h,
                     "|  IBM Consulting 2026", size=900, color="525252", align="l",
                 ))
-            # Page number — bottom-right corner of every slide.
             page_num_text = f"{slide_num} / {len(sections) + 1}"
-            page_num_x = SLIDE_W_EMU - 914400 - 228600   # 1" wide, 0.25" right margin
-            page_num_y = SLIDE_H_EMU - 457200 - 114300   # 0.5" tall, 0.125" bottom margin
+            page_num_x = SLIDE_W_EMU - 914400 - 228600
+            page_num_y = SLIDE_H_EMU - 457200 - 114300
             shapes.append(txt_box(
                 page_num_x, page_num_y, 914400, 457200,
                 page_num_text, size=900, color="8D8D8D", align="r",
             ))
             slide_content = "".join(shapes)
             slides_xml.append((f"slide{slide_num}", slide_content, slide_rel_entries))
-
-        # Assemble slides into XML files
         def wrap_slide(content):
             return (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -6746,12 +4576,8 @@ function showTab(i){{
                 f'{content}'
                 '</p:spTree></p:cSld></p:sld>'
             )
-
-        # ── Build the PPTX zip ──
         pptx_buf = io.BytesIO()
         with zipfile.ZipFile(pptx_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-
-            # Content types
             overrides = ''.join(
                 f'<Override PartName="/ppt/slides/slide{i+1}.xml" '
                 f'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
@@ -6774,16 +4600,12 @@ function showTab(i){{
                 + '</Types>'
             )
             zf.writestr("[Content_Types].xml", ct_xml)
-
-            # Package rels
             zf.writestr("_rels/.rels",
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                 '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>'
                 '</Relationships>'
             )
-
-            # presentation.xml
             slide_id_list = ''.join(
                 f'<p:sldId id="{256+i}" r:id="rIdSl{i+1}"/>'
                 for i in range(len(slides_xml))
@@ -6793,7 +4615,6 @@ function showTab(i){{
                 '<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
                 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
                 'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
-                # Slide master MUST come before slide list (required by schema).
                 '<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMaster"/></p:sldMasterIdLst>'
                 f'<p:sldIdLst>{slide_id_list}</p:sldIdLst>'
                 f'<p:sldSz cx="{SLIDE_W_EMU}" cy="{SLIDE_H_EMU}"/>'
@@ -6801,8 +4622,6 @@ function showTab(i){{
                 '</p:presentation>'
             )
             zf.writestr("ppt/presentation.xml", pres_xml)
-
-            # presentation rels — must include master + theme
             pres_rels = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -6817,8 +4636,6 @@ function showTab(i){{
                 pres_rels += f'<Relationship Id="rIdSl{i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{i+1}.xml"/>'
             pres_rels += '</Relationships>'
             zf.writestr("ppt/_rels/presentation.xml.rels", pres_rels)
-
-            # ── Theme, slide master, slide layout (required by PowerPoint) ──
             theme_xml = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="IBM">'
@@ -6867,8 +4684,6 @@ function showTab(i){{
                 '</a:theme>'
             )
             zf.writestr("ppt/theme/theme1.xml", theme_xml)
-
-            # Slide master — minimal valid content
             slide_master_xml = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
@@ -6899,8 +4714,6 @@ function showTab(i){{
                 'Target="../theme/theme1.xml"/>'
                 '</Relationships>'
             )
-
-            # Slide layout (blank) — minimal valid
             slide_layout_xml = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
@@ -6924,8 +4737,6 @@ function showTab(i){{
                 'Target="../slideMasters/slideMaster1.xml"/>'
                 '</Relationships>'
             )
-
-            # Each slide + its rels
             for i, (name, content, rel_entries) in enumerate(slides_xml):
                 zf.writestr(f"ppt/slides/slide{i+1}.xml", wrap_slide(content))
                 if rel_entries:
@@ -6936,26 +4747,17 @@ function showTab(i){{
                         '</Relationships>'
                     )
                     zf.writestr(f"ppt/slides/_rels/slide{i+1}.xml.rels", slide_rels_xml)
-
-            # Media files
             for fname, fbytes in media_files:
                 zf.writestr(f"ppt/media/{fname}", fbytes)
-
-            # Native OOXML chart parts
             for part_name, xml_bytes in chart_parts:
                 zf.writestr(part_name, xml_bytes)
-
         pptx_bytes = pptx_buf.getvalue()
         pptx_b64 = base64.b64encode(pptx_bytes).decode()
         data_uri = f"data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,{pptx_b64}"
-
         return self._render_pptx_preview(title, client_name, sections, data_uri)
-
     def _render_pptx_preview(self, title, client_name, sections, data_uri):
         safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:50] or "deck"
-
         slide_parts = []
-        # Cover
         slide_parts.append(
             f'<div class="sl" style="display:block;aspect-ratio:16/9;background:{IBM_BLUE_60};'
             f'padding:60px;color:#fff;font-family:\"IBM Plex Sans\",Calibri,sans-serif;position:relative">'
@@ -6964,13 +4766,10 @@ function showTab(i){{
             f'<div style="font-size:14px;margin-top:12px;opacity:0.8">{time.strftime("%B %Y")}</div>'
             f'</div>'
         )
-
-        # Content slides
         for idx, section in enumerate(sections, start=1):
             has_chart = bool(section.get("_chart_spec"))
             has_img = bool(section.get("_img_bytes")) or has_chart
             text_col_w = "50%" if has_img else "100%"
-
             text_html = f'<h2 style="font-size:26px;color:{IBM_GRAY_100};font-weight:700;margin:0 0 16px">{self._html_esc(section.get("title", ""))}</h2>'
             for p in section.get("paragraphs", []) or []:
                 text_html += f'<p style="font-size:13px;color:{IBM_GRAY_100};margin:8px 0;line-height:1.7">{self._html_esc(p)}</p>'
@@ -6981,7 +4780,6 @@ function showTab(i){{
                     for b in bullets
                 )
                 text_html += f'<ul style="padding-left:20px;margin:8px 0">{lis}</ul>'
-
             img_html = ""
             if has_chart:
                 svg = self._svg_chart_from_spec(section["_chart_spec"], width=520, height=300)
@@ -7008,7 +4806,6 @@ function showTab(i){{
                     )
                     + '</div>'
                 )
-
             slide_parts.append(
                 f'<div class="sl" style="display:none;aspect-ratio:16/9;background:#fff;'
                 f'border-left:8px solid {IBM_BLUE_60};padding:40px 48px;font-family:\"IBM Plex Sans\",Calibri,sans-serif;'
@@ -7018,19 +4815,18 @@ function showTab(i){{
                 f'{img_html}'
                 f'</div></div>'
             )
-
         total = len(slide_parts)
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
 *{{box-sizing:border-box;margin:0}}
 html,body{{height:720px;min-height:720px}}
-body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:#f0f2f5;padding:12px;display:flex;align-items:stretch;justify-content:center}}
-.dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:#fff;display:flex;flex-direction:column}}
+body{{font-family:\"IBM Plex Sans\",Calibri,system-ui,sans-serif;background:
+.dk{{border:2px solid {IBM_BLUE_60};border-radius:10px;overflow:hidden;width:100%;max-width:1280px;height:696px;margin:0 auto;background:
 .tb{{display:flex;align-items:center;gap:8px;padding:10px 14px;background:{IBM_BLUE_70};flex-wrap:wrap;flex-shrink:0}}
 .b{{border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;
 font-family:\"IBM Plex Sans\",Calibri,sans-serif;font-weight:600;text-decoration:none;display:inline-block}}
-.bw{{background:#fff;color:{IBM_BLUE_70}}}
-.sn{{color:#fff;font-size:12px;min-width:90px;text-align:center}}
+.bw{{background:
+.sn{{color:
 .sp{{flex:1}}
 .sw{{background:{IBM_GRAY_10};padding:20px;overflow:auto;flex:1;min-height:0}}
 .sl{{max-width:100%;width:100%;margin:0 auto 16px;box-shadow:0 2px 8px rgba(0,0,0,0.12);border-radius:4px;overflow:hidden}}
@@ -7070,16 +4866,10 @@ var sw=document.querySelector(".sw");if(sw)sw.scrollTop=0}}
 document.addEventListener("keydown",function(e){{
 if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 </script></body></html>"""
-
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"})
-
-    # ══════════════════════════════════════════════════════════════════════
-    # UTILITIES
-    # ══════════════════════════════════════════════════════════════════════
     def _ext(self, name: str) -> str:
         if "." not in name: return ""
         return "." + name.rsplit(".", 1)[-1].lower()
-
     def _classify(self, filename: str) -> str:
         f = (filename or "").lower()
         if "case_study" in f or "case-study" in f or "success" in f: return "case_study"
@@ -7087,112 +4877,17 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         if "methodology" in f or "approach" in f or "framework" in f: return "methodology"
         if "offering" in f or "capability" in f or "portfolio" in f: return "capability"
         return "general"
-
     def _humanize(self, stem: str) -> str:
         s = re.sub(r"[_\-]+", " ", stem)
         s = re.sub(r"(\d+)", r" \1", s)
         return s.strip().title()
-
     def _html_esc(self, s: str) -> str:
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-
     async def _emit(self, emitter, msg, done=False):
         if emitter:
-            await emitter({
-                "type": "status",
-                "data": {"description": msg, "done": done},
-            })
-        # Whenever a fresh phase is announced, reset the heartbeat clock so
-        # elapsed-time pings are scoped to the current step, not the whole call.
-        if not done:
-            self._phase = msg
-            self._phase_started = time.time()
-
-    def _set_phase(self, text: str, eta_seconds: Optional[int] = None):
-        """Update the current phase shown by the heartbeat ticker.
-
-        eta_seconds — optional estimated duration. When set, the heartbeat
-        shows a COUNTDOWN ("~8s remaining") instead of elapsed time. The
-        countdown floors at 1s once exceeded (never negative).
-        """
-        self._phase = text
-        self._phase_started = time.time()
-        self._phase_eta = int(eta_seconds) if eta_seconds else None
-
-    async def _heartbeat(self, emitter, interval: int = 3):
-        """Emit a blue-info status every 'interval' seconds while work runs.
-
-        If _phase_eta is set, shows a COUNTDOWN: "⏳ ~Xs remaining — phase".
-        Otherwise shows elapsed: "⏱️ Xs — phase".
-
-        Default interval is now 3 s (was 10) so the countdown feels responsive.
-        """
-        if not emitter:
-            return
-        try:
-            # First emit after 1s so user sees the ETA quickly, then every 'interval'.
-            await asyncio.sleep(1)
-            while True:
-                elapsed = int(time.time() - (self._phase_started or time.time()))
-                phase = self._phase or "working"
-                eta = getattr(self, "_phase_eta", None)
-                if eta is not None:
-                    remaining = max(1, eta - elapsed)
-                    if elapsed > eta:
-                        # Exceeded ETA — switch to elapsed with an honest signal
-                        desc = f"🔵 ⏱️ {elapsed}s (over estimate) — {phase}"
-                    else:
-                        desc = f"🔵 ⏳ ~{remaining}s remaining ({elapsed}s elapsed) — {phase}"
-                else:
-                    desc = f"🔵 ⏱️ {elapsed}s — {phase}"
-                await emitter({
-                    "type": "status",
-                    "data": {"description": desc, "done": False},
-                })
-                await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            return
-
-    def _start_heartbeat(self, emitter, interval: int = 3, eta_seconds: Optional[int] = None,
-                         initial_phase: Optional[str] = None):
-        """Spawn a heartbeat task; returns the task so callers can cancel it.
-
-        eta_seconds — optional ETA in seconds for countdown display.
-        initial_phase — optional phase text to set before first tick.
-        """
-        if not emitter:
-            return None
-        if initial_phase:
-            self._set_phase(initial_phase, eta_seconds=eta_seconds)
-        elif eta_seconds is not None:
-            self._phase_eta = int(eta_seconds)
-            self._phase_started = time.time()
-        try:
-            return asyncio.create_task(self._heartbeat(emitter, interval))
-        except RuntimeError:
-            return None
-
-    # Known ETAs per phase (rough, per benchmark). Used as countdown hints.
-    _PHASE_ETA_DEFAULT = {
-        "prepare_content_smart":          8,
-        "prepare_content_from_web_search": 6,
-        "prepare_content_from_attachments": 10,
-        "enrich_sections_with_images":    3,
-        "generate_image":                 4,
-        "assemble_document":              2,
-        "render_visualization":           1,
-    }
-
-    def _eta_for(self, phase_key: str, scale: float = 1.0) -> int:
-        base = self._PHASE_ETA_DEFAULT.get(phase_key, 5)
-        return max(1, int(base * scale))
-
-    @staticmethod
-    async def _stop_heartbeat(task):
-        if not task:
-            return
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+            try: await emitter({"type": "status", "data": {"description": msg, "done": done}})
+            except Exception: pass
+    def _start_heartbeat(self, emitter, eta_seconds=None, initial_phase=None): return None
+    async def _stop_heartbeat(self, task): return None
+    def _set_phase(self, phase, eta_seconds=None): pass
+    def _eta_for(self, phase_key, scale=1.0): return 5
