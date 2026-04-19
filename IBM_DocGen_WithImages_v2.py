@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 18:20 IST (DOCX cap 300, max_tokens=8192 — fix Bedrock TransferEncodingError on long assemble_document args)
+# Last synced to OWUI DB: 2026-04-19 18:25 IST (max_tokens=80000, builtins off, narrate-progress rule)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
