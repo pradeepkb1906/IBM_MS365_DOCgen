@@ -2988,10 +2988,12 @@ class Tools:
             return None
         results = await asyncio.gather(*[match_one(s) for s in sections], return_exceptions=True)
         for s, m in zip(sections, results):
-            if isinstance(m, dict): s["_kb_match"] = m
+            if isinstance(m, dict) and m.get("image_bytes"):
+                s["_kb_match"] = m
         accepted = sum(1 for s in sections if s.get("_kb_match"))
         try: await self._emit(__event_emitter__,
-            f"👁️ KB vision layout: {accepted}/{len(sections)} sections matched ≥{thr}/100")
+            f"👁️ KB 50/50 layout applied to {accepted}/{len(sections)} sections with ≥{thr}/100 image match "
+            f"(others render as full-width text)")
         except Exception: pass
         return sections
     def _rank_images(self, query, images):
@@ -3409,52 +3411,41 @@ class Tools:
         ))
         doc_parts.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
         def kb_right_cell_xml(kb):
-            """Build the inner XML of the right cell in a 50/50 layout (image or ref card)."""
+            """Build the inner XML of the right cell: embedded image + caption."""
             parts = []
-            if kb.get("image_bytes"):
-                idx = len(media_files)
-                fn = f"kb_image_{idx+1}.png"
-                media_files.append((fn, kb["image_bytes"]))
-                rid = f"rIdKbImg{idx}"
-                rel_entries.append(
-                    f'<Relationship Id="{rid}" '
-                    f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
-                    f'Target="media/{fn}"/>'
-                )
-                w_emu, h_emu = 3200000, 2400000
-                parts.append(
-                    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
-                    '<w:r><w:drawing>'
-                    '<wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
-                    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
-                    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
-                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-                    f'<wp:extent cx="{w_emu}" cy="{h_emu}"/>'
-                    f'<wp:docPr id="{idx+2000}" name="KB Image {idx+1}"/>'
-                    '<wp:cNvGraphicFramePr/>'
-                    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
-                    '<pic:pic>'
-                    f'<pic:nvPicPr><pic:cNvPr id="{idx+2000}" name="{fn}"/><pic:cNvPicPr/></pic:nvPicPr>'
-                    f'<pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
-                    '<pic:spPr>'
-                    f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{w_emu}" cy="{h_emu}"/></a:xfrm>'
-                    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
-                    '</pic:spPr></pic:pic></a:graphicData></a:graphic>'
-                    '</wp:inline></w:drawing></w:r></w:p>'
-                )
-                cap = f"{kb.get('caption','')}  ·  {kb.get('source_file','KB')}"[:160]
-                parts.append(para_xml(run_xml(cap, size=16, italic=True, color="525252"),
-                                       align="center", after=60))
-            else:
-                parts.append(para_xml(run_xml(f"📄 {kb.get('source_file','Knowledge base')}",
-                                               size=22, bold=True, color="0F62FE"),
-                                       align="left", after=120))
-                parts.append(para_xml(run_xml(
-                    f"Page {kb.get('page','?')}  ·  Match score {int(kb.get('score',0))}/100",
-                    size=18, color="525252"), align="left", after=120))
-                parts.append(para_xml(run_xml(f'"{kb.get("caption","")}"',
-                                               size=20, italic=True, color="161616"),
-                                       align="left", after=60))
+            idx = len(media_files)
+            fn = f"kb_image_{idx+1}.png"
+            media_files.append((fn, kb["image_bytes"]))
+            rid = f"rIdKbImg{idx}"
+            rel_entries.append(
+                f'<Relationship Id="{rid}" '
+                f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                f'Target="media/{fn}"/>'
+            )
+            w_emu, h_emu = 3200000, 2400000
+            parts.append(
+                '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+                '<w:r><w:drawing>'
+                '<wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                f'<wp:extent cx="{w_emu}" cy="{h_emu}"/>'
+                f'<wp:docPr id="{idx+2000}" name="KB Image {idx+1}"/>'
+                '<wp:cNvGraphicFramePr/>'
+                '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+                '<pic:pic>'
+                f'<pic:nvPicPr><pic:cNvPr id="{idx+2000}" name="{fn}"/><pic:cNvPicPr/></pic:nvPicPr>'
+                f'<pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+                '<pic:spPr>'
+                f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{w_emu}" cy="{h_emu}"/></a:xfrm>'
+                '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+                '</pic:spPr></pic:pic></a:graphicData></a:graphic>'
+                '</wp:inline></w:drawing></w:r></w:p>'
+            )
+            cap = f"{kb.get('caption','')}  ·  {kb.get('source_file','KB')}"[:160]
+            parts.append(para_xml(run_xml(cap, size=16, italic=True, color="525252"),
+                                   align="center", after=60))
             return "".join(parts)
         def kb_2col_section_xml(section, kb):
             """Whole section wrapped as 50/50 w:tbl: left = text, right = image/card."""
@@ -3742,19 +3733,12 @@ class Tools:
                 )
             page_num = idx + 1
             kb = section.get("_kb_match")
-            if kb:
-                if kb.get("image_bytes"):
-                    img_b64 = base64.b64encode(kb["image_bytes"]).decode()
-                    right = (f'<img src="data:image/png;base64,{img_b64}" '
-                             f'style="max-width:100%;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.1)"/>'
-                             f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
-                             f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
-                else:
-                    right = (f'<div style="padding:20px;border:2px solid {IBM_BLUE_60};border-radius:8px;background:#F4F8FF">'
-                             f'<div style="font-size:14px;color:{IBM_BLUE_60};font-weight:700;margin-bottom:8px">📄 {self._html_esc(kb.get("source_file",""))}</div>'
-                             f'<div style="font-size:11px;color:{IBM_GRAY_70};margin-bottom:12px">Page {kb.get("page","?")}  ·  Match score {int(kb.get("score",0))}/100</div>'
-                             f'<div style="font-size:12px;color:{IBM_GRAY_100};font-style:italic;line-height:1.5">"{self._html_esc(kb.get("caption",""))}"</div>'
-                             f'</div>')
+            if kb and kb.get("image_bytes"):
+                img_b64 = base64.b64encode(kb["image_bytes"]).decode()
+                right = (f'<img src="data:image/png;base64,{img_b64}" '
+                         f'style="max-width:100%;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.1)"/>'
+                         f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
+                         f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
                 page_body = (f'<div style="display:flex;gap:24px">'
                              f'<div style="flex:1;min-width:0">{"".join(parts)}</div>'
                              f'<div style="flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center">{right}</div>'
@@ -4823,30 +4807,19 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
             if has_kb:
                 kb = section["_kb_match"]
                 ch_x, ch_y, ch_w = 6629400, 1143000, 5105400
-                if kb.get("image_bytes"):
-                    media_idx = len(media_files)
-                    fname_kb = f"kb_image_{media_idx+1}.png"
-                    media_files.append((fname_kb, kb["image_bytes"]))
-                    rid = f"rId{len(slide_rel_entries)+2}"
-                    slide_rel_entries.append(
-                        f'<Relationship Id="{rid}" '
-                        f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
-                        f'Target="../media/{fname_kb}"/>'
-                    )
-                    shapes.append(image_xml(rid, ch_x, ch_y, ch_w, 3600000))
-                    cap = (f"📎 {kb.get('caption','')}  ·  from {kb.get('source_file','KB')}")[:120]
-                    shapes.append(txt_box(ch_x, ch_y + 3600000 + 50000, ch_w, 400000,
-                                           cap, size=900, color="525252"))
-                else:
-                    card_title = f"📄 {kb.get('source_file','Knowledge base')}"
-                    shapes.append(txt_box(ch_x, ch_y, ch_w, 457200, card_title,
-                                           size=1400, bold=True, color="0F62FE"))
-                    shapes.append(txt_box(ch_x, ch_y + 500000, ch_w, 400000,
-                                           f"Page {kb.get('page','?')}  ·  score {int(kb.get('score',0))}/100",
-                                           size=1100, color="525252"))
-                    shapes.append(txt_box(ch_x, ch_y + 1000000, ch_w, 2500000,
-                                           f'"{kb.get("caption","")}"',
-                                           size=1300, color="161616"))
+                media_idx = len(media_files)
+                fname_kb = f"kb_image_{media_idx+1}.png"
+                media_files.append((fname_kb, kb["image_bytes"]))
+                rid = f"rId{len(slide_rel_entries)+2}"
+                slide_rel_entries.append(
+                    f'<Relationship Id="{rid}" '
+                    f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                    f'Target="../media/{fname_kb}"/>'
+                )
+                shapes.append(image_xml(rid, ch_x, ch_y, ch_w, 3600000))
+                cap = (f"📎 {kb.get('caption','')}  ·  from {kb.get('source_file','KB')}")[:120]
+                shapes.append(txt_box(ch_x, ch_y + 3600000 + 50000, ch_w, 400000,
+                                       cap, size=900, color="525252"))
             elif has_chart:
                 ch_x = 6629400
                 ch_y = 1143000
@@ -5131,18 +5104,11 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
             img_html = ""
             if has_kb:
                 kb = section["_kb_match"]
-                if kb.get("image_bytes"):
-                    b64 = base64.b64encode(kb["image_bytes"]).decode()
-                    inner = (f'<img src="data:image/png;base64,{b64}" '
-                             f'style="max-width:100%;max-height:55vh;border-radius:4px;object-fit:contain"/>'
-                             f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
-                             f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
-                else:
-                    inner = (f'<div style="padding:24px;border:2px solid {IBM_BLUE_60};border-radius:8px;background:#F4F8FF">'
-                             f'<div style="font-size:15px;color:{IBM_BLUE_60};font-weight:700;margin-bottom:10px">📄 {self._html_esc(kb.get("source_file",""))}</div>'
-                             f'<div style="font-size:12px;color:{IBM_GRAY_70};margin-bottom:14px">Page {kb.get("page","?")}  ·  Match score {int(kb.get("score",0))}/100</div>'
-                             f'<div style="font-size:13px;color:{IBM_GRAY_100};font-style:italic;line-height:1.5">"{self._html_esc(kb.get("caption",""))}"</div>'
-                             f'</div>')
+                b64 = base64.b64encode(kb["image_bytes"]).decode()
+                inner = (f'<img src="data:image/png;base64,{b64}" '
+                         f'style="max-width:100%;max-height:55vh;border-radius:4px;object-fit:contain"/>'
+                         f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
+                         f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
                 img_html = (f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
                             f'{inner}</div>')
             elif has_chart:

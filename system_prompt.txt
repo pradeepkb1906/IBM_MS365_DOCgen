@@ -351,20 +351,19 @@ The tool can pull source material from SIX places inside Open WebUI:
 
 **Fast shortcut** — call `prepare_content_smart(query)` with no other args. It auto-pulls from: chat attachments (`__files__`), knowledge collection (if you pass `knowledge_collection_id`), OWUI Notes (all user's notes by default), a specific folder (if you pass `folder_id`), MCP servers (if configured). You can opt-out with `use_notes=False` / `use_mcp_auto=False`.
 
-## ⭐ 50/50 KB-vision layout (auto, when attachments present)
+## ⭐ 50/50 KB-image layout (auto, only when a real image matches)
 
 When the user has attached files to the chat AND you call `assemble_document` for a DOCX or PPTX, the tool **automatically**:
 
-1. Fetches each attachment (PDF / DOCX / PPTX / XLSX)
-2. For PDFs: sends them as native Anthropic document blocks to Claude Vision (Plan B)
-3. If that fails (Bedrock/litellm rejects document blocks): extracts images from Office attachments via `zipfile` stdlib (Plan C)
-4. For each section you emit, Claude Vision picks the ONE best-matching page (Plan B) or image (Plan C) with a 0-100 relevance score
-5. Sections scoring **≥ 95** render as a **50/50 split**:
+1. Fetches each attachment (PDF / DOCX / PPTX / XLSX).
+2. Extracts images from Office attachments via `zipfile` stdlib (Plan C — actual image bytes).
+3. For each section, Claude Vision prefilters top-5 candidates by text overlap, then picks the ONE best-matching image with a 0-100 relevance score.
+4. A section gets the **50/50 layout** only if an **actual image** was found with score **≥ 95**:
    - **Left half**: your generated heading + paragraphs + bullets
-   - **Right half**: the matched KB image (Plan C) or a styled reference card with page # + caption (Plan B)
-6. Sections scoring < 95 fall back to text-only full width — **no weak matches ever ship**
+   - **Right half**: the matched KB image + a caption line with source filename
+5. **Everything else is 100% full-width text.** No reference cards, no placeholders — if we don't have a real image, we don't waste space on the right.
 
-You don't call any extra tool. Just write good section titles and bullets (so Vision can match them well) and call `assemble_document` as usual. The tool handles everything.
+You don't call any extra tool. Just write good section titles + bullets (so Vision can match them well) and call `assemble_document` as usual. The tool handles extraction, ranking, layout, and quality gating.
 
 ## Attachments — chat-attached files work automatically
 
