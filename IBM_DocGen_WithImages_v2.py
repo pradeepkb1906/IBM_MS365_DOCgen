@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 18:35 IST (web-image fetch stripped from all prepare_*; charts from tables restored; Wikipedia full extracts)
+# Last synced to OWUI DB: 2026-04-19 18:20 IST (DOCX cap 300, max_tokens=8192 — fix Bedrock TransferEncodingError on long assemble_document args)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -5273,12 +5273,14 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 
         return self._render_xlsx_preview(title, client_name, sheets, data_uri)
 
-    # Hard content caps (2026-04-19 user policy v3):
+    # Hard content caps (2026-04-19 user policy v6):
     #   PPTX = 100 words per slide  (title + paragraphs + bullets combined)
-    #   DOCX = 500 words per page   (paragraphs + bullets combined)
+    #   DOCX = 300 words per page   (was 500 — reduced to avoid Bedrock Opus
+    #                                 streaming TransferEncodingError on long
+    #                                 sections_json args for multi-page docs)
     #   XLSX = 50 rows per sheet    (data rows, header excluded)
     MAX_WORDS_PPTX = 100
-    MAX_WORDS_DOCX = 500
+    MAX_WORDS_DOCX = 300
     MAX_ROWS_XLSX = 50
 
     # ──────────────────────────────────────────────────────────────────────
