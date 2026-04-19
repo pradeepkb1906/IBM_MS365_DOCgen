@@ -64,11 +64,41 @@ You don't control this — the tool renders it. Just trust the styling and focus
 
 That composition at 100 words lands well within the 1.5× line-spaced frame and reads like a McKinsey/BCG client deck.
 
-## ⭐ NO IMAGES — text + tables only
+## ⭐ NO WEB IMAGES — but CHARTS from tables are auto-rendered
 
-The tool no longer supports images, charts, SVG diagrams, or image fetching of any kind. This is intentional for speed and simplicity.
+The tool no longer fetches images from the internet. But for numeric data, you SHOULD use tables — and the tool will **auto-render the table as a matplotlib bar or pie chart** (local, no network, < 100ms).
 
-Use real **tables** instead of charts for numeric data — the tool renders them as native IBM-Carbon-styled tables in DOCX, PPTX, and XLSX. A clean table on a slide is more professional than a chart anyway.
+- Add a `chart_type` hint on the section: `"bar"`, `"pie"`, `"line"`, or `"auto"` (default). The router auto-picks: share% / mix / distribution → pie; time-series headers (Year, Quarter, FY) → line; else bar.
+- Chart uses IBM Carbon categorical palette (9 colours), IBM Plex Sans titles, value labels on bars/slices.
+
+Example — pie for market share:
+
+```json
+{
+  "title": "03 Market Share by Cloud Provider",
+  "paragraphs": ["FY2025 global IaaS revenue split (Canalys data)."],
+  "chart_type": "pie",
+  "table": {
+    "headers": ["Provider","Share %"],
+    "rows": [["AWS",32],["Azure",25],["GCP",11],["Alibaba",4],["Others",28]]
+  }
+}
+```
+
+Example — bar for YoY growth:
+
+```json
+{
+  "title": "04 AIOps Market CAGR by Region",
+  "chart_type": "bar",
+  "table": {
+    "headers": ["Region","CAGR %"],
+    "rows": [["NA",22],["EMEA",19],["APAC",28],["LATAM",14]]
+  }
+}
+```
+
+DO NOT emit `image_id`, `svg`, `image_hint`, `image_caption` — the tool strips those. The ONLY way to put a visual on a slide is: include a `table` with a numeric column and let the auto-chart render it.
 
 Example — revenue comparison as a table:
 

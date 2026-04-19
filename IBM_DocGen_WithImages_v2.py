@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 18:20 IST (image-logic stripped; IBM logo 1cm on PPTX/DOCX/XLSX; page numbers L-logo R-pagenum)
+# Last synced to OWUI DB: 2026-04-19 18:35 IST (web-image fetch stripped from all prepare_*; charts from tables restored; Wikipedia full extracts)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -1067,24 +1067,15 @@ class Tools:
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_attachments'), initial_phase='📎 Extracting from attachments')
             auth = self._auth_from_request(__request__)
 
-            text_chunks, all_images = await asyncio.to_thread(
+            # Text only — image extraction removed per user policy v5.
+            text_chunks, _unused_imgs = await asyncio.to_thread(
                 self._extract_attachments_parallel, attachment_file_ids, auth, 4
             )
-
-            await self._emit(__event_emitter__, f"📚 {len(text_chunks)} chunks · {len(all_images)} raw images")
-
-            if self.valves.vision_rank_enabled and all_images:
-                await self._emit(__event_emitter__, f"👁️ Vision-ranking {min(len(all_images), self.valves.vision_rank_max_images)} images...")
-                all_images = await self._vision_rank_async(query, all_images, auth)
-            ranked = self._rank_images(query, all_images)[:max_images]
-            for i, img in enumerate(ranked):
-                img["display_id"] = f"IMG{i+1}"
-                _IMAGE_STORE.pin(img.get("id",""), f"IMG{i+1}")
             text_chunks = self._rank_text(query, text_chunks)[:self.valves.max_text_chunks]
 
-            await self._emit(__event_emitter__, f"✨ {len(ranked)} images ready", done=True)
+            await self._emit(__event_emitter__, f"📚 {len(text_chunks)} text chunks ready", done=True)
             await self._stop_heartbeat(_hb)
-            return self._package(query, text_chunks, ranked, source="chat_attachments")
+            return self._package(query, text_chunks, [], source="chat_attachments")
         except Exception:
             try: await self._stop_heartbeat(_hb)
             except Exception: pass
@@ -1110,27 +1101,11 @@ class Tools:
         try:
             await self._emit(__event_emitter__, f"🌐 Searching: {query}")
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_web_search'), initial_phase='🌐 Searching the web')
+            # Text only — image logic removed per user policy v5.
             text_chunks = self._web_search_text(query, num_text_results)
-            await self._emit(__event_emitter__, f"📚 {len(text_chunks)} web results")
-
-            await self._emit(__event_emitter__, "🖼️ Fetching images...")
-            image_candidates = self._web_search_images(query, min(num_image_results, 10))
-            await self._emit(__event_emitter__, f"🎨 Downloading {len(image_candidates)} images...")
-
-            ingested = await asyncio.to_thread(
-                self._ingest_images_parallel, image_candidates, 6
-            )
-
-            if self.valves.vision_rank_enabled and ingested:
-                ingested = await self._vision_rank_async(query, ingested, self._auth_from_request(__request__))
-            ranked = self._rank_images(query, ingested)[:num_image_results]
-            for i, img in enumerate(ranked):
-                img["display_id"] = f"IMG{i+1}"
-                _IMAGE_STORE.pin(img.get("id",""), f"IMG{i+1}")
-
-            await self._emit(__event_emitter__, f"✨ {len(ranked)} images ready", done=True)
+            await self._emit(__event_emitter__, f"📚 {len(text_chunks)} web results", done=True)
             await self._stop_heartbeat(_hb)
-            return self._package(query, text_chunks, ranked, source="web_search")
+            return self._package(query, text_chunks, [], source="web_search")
         except Exception:
             try: await self._stop_heartbeat(_hb)
             except Exception: pass
@@ -1378,11 +1353,9 @@ class Tools:
                         print(f"[MCP mixed] {sid}.{tname} failed: {e}")
 
             if web_search:
-                await self._emit(__event_emitter__, "🌐 Web search...")
+                await self._emit(__event_emitter__, "🌐 Web search (text only)...")
                 all_text.extend(self._web_search_text(query, 6))
-                cands = self._web_search_images(query, 10)
-                all_images.extend(await asyncio.to_thread(
-                    self._ingest_images_parallel, cands, 6))
+                # Image fetching removed per user policy v5.
 
             if self.valves.vision_rank_enabled and all_images:
                 await self._emit(__event_emitter__, f"👁️ Vision-ranking {min(len(all_images), self.valves.vision_rank_max_images)} images...")
@@ -1613,24 +1586,14 @@ class Tools:
                             except Exception as e:
                                 print(f"[smart] {t['server_id']}.{t['name']} failed: {e}")
 
-            # Auto-fallback: if no content from any other source, use web search so
-            # the document always has at least images/text from Wikipedia/Wikimedia.
-            web_only_images = False  # track whether all imagery came from web (skip vision-ranking)
+            # Auto-fallback: if no content from any other source, use web search.
+            # Text only — image logic removed per user policy v5.
+            web_only_images = False
             if use_web_search or (not all_text and not all_images):
-                await self._emit(__event_emitter__, "🌐 Web search (parallel text + images)...")
-                # Run text + image fetch in parallel instead of sequentially.
-                text_task = asyncio.to_thread(self._web_search_text, query, 6)
-                cands_task = asyncio.to_thread(self._web_search_images, query, max_images)
-                web_texts, cands = await asyncio.gather(text_task, cands_task)
+                await self._emit(__event_emitter__, "🌐 Web search (text only)...")
+                web_texts = await asyncio.to_thread(self._web_search_text, query, 6)
                 all_text.extend(web_texts)
-                web_imgs = await asyncio.to_thread(
-                    self._ingest_images_parallel, cands, self.valves.image_fetch_parallelism)
-                all_images.extend(web_imgs)
                 source_log.append("web_search")
-                # If ALL images came from web (attachments / knowledge / MCP added none),
-                # trust the search — skip vision-ranking entirely. Saves 20-40s on Bedrock.
-                if len(web_imgs) == len(all_images):
-                    web_only_images = True
 
             if not all_text and not all_images:
                 return json.dumps({
@@ -1770,24 +1733,25 @@ class Tools:
                 await self._emit(__event_emitter__,
                     f"⚠️ {len(missing_images)} image(s) expired/missing — continuing without them")
 
-            # IMAGE LOGIC REMOVED (2026-04-19 user policy v4): all inline images,
-            # auto-charts, SVG rasterization are stripped. Documents are text + tables
-            # only. Tables render as native tables (not charts). IBM logo on cover
-            # and footer remains as a static asset.
-            # Strip any image hints the LLM may have emitted so downstream renderers
-            # skip the image-insertion path entirely.
+            # Strip WEB-image references only (image_id, svg, image_hint); keep
+            # chart_type + chart_data because those drive local matplotlib
+            # rendering from table data — no network involved.
             stripped = []
             for s in resolved_sections:
                 if isinstance(s, dict):
                     clean = {k: v for k, v in s.items()
-                             if k not in ("image_id", "svg", "_img_bytes",
+                             if k not in ("image_id", "svg",
                                           "_img_width", "_img_height", "_img_source",
-                                          "image_caption", "chart_type", "chart_data",
-                                          "image_hint")}
+                                          "image_caption", "image_hint")}
                     stripped.append(clean)
                 else:
                     stripped.append(s)
             resolved_sections = stripped
+
+            # Auto-inject charts for sections with numeric tables (DOCX + PPTX).
+            # This is LOCAL matplotlib rendering, not a web fetch — very fast (< 100ms).
+            if format in ("docx", "pptx"):
+                resolved_sections = self._autoinject_charts(resolved_sections)
 
             # Enforce content caps per format:
             #   PPTX: 100 words/slide, DOCX: 500 words/page, XLSX: 50 rows/sheet
@@ -4308,25 +4272,41 @@ class Tools:
 
     # ── Keyless fallbacks: Wikipedia text + Wikimedia Commons images ──
     def _wikipedia_search_text(self, query, num=6):
-        """Free, keyless text search via Wikipedia REST API."""
+        """Free, keyless text search via Wikipedia REST API.
+
+        Fetches search snippets AND the first paragraph (extract) of each
+        matching article for richer context. Uses compliant UA.
+        """
         out = []
         try:
-            r = requests.get(
+            # Step 1: search for matching article titles
+            r = self._http.get(
                 "https://en.wikipedia.org/w/api.php",
-                params={"action": "query", "format": "json", "list": "search",
-                        "srsearch": query, "srlimit": max(1, min(num, 10)),
-                        "srprop": "snippet"},
-                headers={"User-Agent": "IBM-DocGen/2.0"},
+                params={
+                    "action": "query", "format": "json",
+                    "generator": "search",
+                    "gsrsearch": query,
+                    "gsrlimit": max(1, min(num, 8)),
+                    "gsrnamespace": 0,
+                    "prop": "extracts|info",
+                    "exintro": 1, "explaintext": 1, "exchars": 1500,
+                    "inprop": "url",
+                    "redirects": 1,
+                },
+                headers={"User-Agent": self._WIKI_UA, "Accept": "application/json"},
                 timeout=self.valves.request_timeout,
             )
             r.raise_for_status()
-            for item in r.json().get("query", {}).get("search", []):
-                title = item.get("title", "")
-                # Strip HTML from snippet
-                snippet = re.sub(r"<[^>]+>", "", item.get("snippet", ""))
-                url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+            pages = r.json().get("query", {}).get("pages", {})
+            ordered = sorted(pages.values(), key=lambda p: p.get("index", 999))
+            for page in ordered:
+                title = page.get("title", "")
+                extract = (page.get("extract") or "").strip()
+                url = page.get("fullurl") or f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                if not extract:
+                    continue
                 out.append({
-                    "content": f"{title}. {snippet}",
+                    "content": f"{title}\n\n{extract}",
                     "source": "en.wikipedia.org",
                     "url": url, "page": 0, "doc_type": "web",
                 })
