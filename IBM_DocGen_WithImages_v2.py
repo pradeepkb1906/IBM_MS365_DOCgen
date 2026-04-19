@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 15:45 IST (image-density rule: ceil(n/5) — huge speed win)
+# Last synced to OWUI DB: 2026-04-19 16:30 IST (HARD CAP: 1 hero image per deck + 15s enrich timeout)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -1947,10 +1947,13 @@ class Tools:
                 caption = self._build_image_caption(prompt, resolved_kind)
                 need_images.append((i, out, prompt, resolved_kind, caption, has_explicit_hint))
 
-            # Compute image quota. Rule: ceil(n/5), clamped to [1, n].
+            # Compute image quota. NEW RULE (2026-04-19): 1 image per deck total,
+            # regardless of slide count. User feedback: multi-image enrichment
+            # added too much latency; a single hero image is plenty. Override only
+            # when max_images is explicitly passed.
             n = len(need_images)
             if max_images is None:
-                quota = max(1, math.ceil(n / 5)) if n > 0 else 0
+                quota = 1 if n > 0 else 0
             else:
                 quota = max(0, min(max_images, n))
 
@@ -2016,7 +2019,17 @@ class Tools:
                     image_rec = await asyncio.to_thread(_one, prompt, kind, caption)
                 return (idx, out, prompt, caption, image_rec)
 
-            results = await asyncio.gather(*[_worker(it) for it in to_fetch])
+            # Hard wall-clock timeout — if enrichment can't finish in 15 s,
+            # ship what we have (or nothing) and let the deck proceed text-only.
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*[_worker(it) for it in to_fetch]),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                await self._emit(__event_emitter__,
+                    "⏱️ Image enrichment over 15s — proceeding text-only for speed")
+                results = []
 
             # Stitch results back into the enriched array in original order
             for idx, out, prompt, caption, image_rec in results:
