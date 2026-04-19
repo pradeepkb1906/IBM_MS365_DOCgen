@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Claude/local state
+.claude/
+CLAUDE.md
+
+# OWUI backups from our patches (don't commit these)
+*.bak-*
+
+# Sensitive — never commit secrets
+.webui_secret_key
+*.secret
+*.key
+.env*
