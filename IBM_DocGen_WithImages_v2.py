@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 19:00 IST (logo 0.4cm, justified paragraphs, strip bullet numbering)
+# Last synced to OWUI DB: 2026-04-19 19:15 IST (caps 15/15/10+100, Notes source, smart merges notes+attachments+knowledge+MCP)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -1029,6 +1029,124 @@ class Tools:
         except Exception:
             return json.dumps({"error": traceback.format_exc(), "text_chunks": [], "images": []})
 
+    async def prepare_content_from_notes(
+        self,
+        query: str,
+        note_ids: Optional[list[str]] = None,
+        max_chunks: int = 12,
+        __user__: Optional[dict] = None,
+        __request__=None,
+        __event_emitter__=None,
+    ) -> str:
+        """
+        Source mode: OWUI Notes. Reads the user's notes stored in OWUI
+        (note_ids whitelist or all notes owned by this user) and returns
+        text chunks suitable for assemble_document.
+
+        :param query: Topic/question — used to rank note excerpts for relevance.
+        :param note_ids: Optional list of specific note IDs. If omitted, the
+            tool pulls ALL notes owned by the current user.
+        :param max_chunks: Max text chunks to return (default 12).
+        """
+        _hb = None
+        try:
+            await self._emit(__event_emitter__, f"📝 Reading user notes for: {query[:60]}")
+            _hb = self._start_heartbeat(__event_emitter__,
+                eta_seconds=self._eta_for('prepare_content_from_attachments'),
+                initial_phase='📝 Reading notes')
+            auth = self._auth_from_request(__request__)
+            user_id = (__user__ or {}).get("id") or ""
+            # Read notes from OWUI DB directly (keyless — same DB OWUI is using).
+            # OWUI's /api/v1/notes requires the caller's JWT; hitting the DB
+            # sidesteps self-request deadlock and gives us richer text.
+            text_chunks = self._read_owui_notes(user_id=user_id, note_ids=note_ids or None)
+            if not text_chunks:
+                await self._stop_heartbeat(_hb)
+                return json.dumps({
+                    "error": "No notes found for this user.",
+                    "hint": "Create a note in OWUI's Notes panel, or pass note_ids explicitly.",
+                    "text_chunks": [], "images": [],
+                })
+            text_chunks = self._rank_text(query, text_chunks)[:max_chunks]
+            await self._emit(__event_emitter__,
+                f"📚 {len(text_chunks)} note chunks ready", done=True)
+            await self._stop_heartbeat(_hb)
+            return self._package(query, text_chunks, [], source="owui_notes")
+        except Exception:
+            try: await self._stop_heartbeat(_hb)
+            except Exception: pass
+            return json.dumps({"error": traceback.format_exc(),
+                               "text_chunks": [], "images": []})
+
+    def _read_owui_notes(self, user_id: str = "", note_ids: Optional[list] = None) -> list[dict]:
+        """Pull note rows from OWUI's SQLite directly. Returns text_chunks list."""
+        import sqlite3 as _sql, os as _os, re as _re
+        # Auto-discover OWUI DB path via the running process
+        db_path = None
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                "lsof -p $(pgrep -f 'open-webui serve'|head -1)|grep webui.db|awk '{print $NF}'|sort -u|head -1",
+                shell=True, timeout=5,
+            ).decode().strip()
+            if out and _os.path.exists(out):
+                db_path = out
+        except Exception:
+            pass
+        if not db_path:
+            # Fall back to the canonical path
+            db_path = "/Users/pradeepbasavarajappa/.local/share/uv/tools/open-webui/lib/python3.12/site-packages/open_webui/data/webui.db"
+        if not _os.path.exists(db_path):
+            return []
+        try:
+            con = _sql.connect(db_path, timeout=10)
+            con.execute("PRAGMA busy_timeout=5000")
+            if note_ids:
+                placeholders = ",".join(["?"] * len(note_ids))
+                rows = con.execute(
+                    f"SELECT id, user_id, title, data FROM note WHERE id IN ({placeholders})",
+                    note_ids,
+                ).fetchall()
+            elif user_id:
+                rows = con.execute(
+                    "SELECT id, user_id, title, data FROM note WHERE user_id=? ORDER BY updated_at DESC LIMIT 50",
+                    (user_id,),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT id, user_id, title, data FROM note ORDER BY updated_at DESC LIMIT 50"
+                ).fetchall()
+            con.close()
+        except Exception as e:
+            print(f"[DocGen] reading OWUI notes failed: {e}")
+            return []
+
+        chunks = []
+        for nid, uid, title, data in rows:
+            # data is a JSON blob; body is often under data.content or data.text
+            body = ""
+            if isinstance(data, str):
+                try:
+                    parsed = json.loads(data) if data else {}
+                except Exception:
+                    parsed = {}
+                body = (parsed.get("content") or parsed.get("text") or parsed.get("body")
+                        or (data if len(data) < 50000 else ""))
+            # Strip basic markdown/HTML noise
+            body = re.sub(r"<[^>]+>", " ", str(body))
+            body = re.sub(r"\s+", " ", body).strip()
+            if not body:
+                continue
+            # Split into ~2000-char chunks for ranking
+            for sub in self._chunk_text(body):
+                chunks.append({
+                    "content": (f"{title}. {sub}" if title else sub),
+                    "source": f"owui-note:{nid}",
+                    "url": f"#note/{nid}",
+                    "page": 0, "doc_type": "note",
+                })
+        return chunks
+
     async def prepare_content_from_attachments(
         self,
         query: str,
@@ -1489,6 +1607,8 @@ class Tools:
         query: str,
         knowledge_collection_id: Optional[str] = None,
         attachment_file_ids: Optional[list[str]] = None,
+        note_ids: Optional[list[str]] = None,
+        use_notes: bool = True,
         use_mcp_auto: bool = True,
         use_web_search: bool = False,
         max_mcp_tools: int = 3,
@@ -1500,8 +1620,9 @@ class Tools:
     ) -> str:
         """
         One-call "do the right thing" mode. Tool figures out where to pull from:
-          - Attachments (if file IDs given)
+          - Attachments (if file IDs given, OR auto-detected from chat)
           - Knowledge collection (if ID given)
+          - OWUI Notes (all user's notes, unless use_notes=False)
           - MCP auto-routing (tries all configured MCP servers, picks best tools)
           - Web search (if enabled)
 
@@ -1553,6 +1674,17 @@ class Tools:
                 all_text.extend(tc)
                 all_images.extend(ti)
                 source_log.append(f"attachments:{len(attachment_file_ids)}")
+
+            # OWUI Notes — auto-pull when use_notes=True (default) OR caller passed note_ids.
+            # Reads directly from OWUI's SQLite for speed (no self-HTTP).
+            if use_notes or note_ids:
+                user_id = (__user__ or {}).get("id") or ""
+                note_chunks = self._read_owui_notes(user_id=user_id, note_ids=note_ids or None)
+                if note_chunks:
+                    await self._emit(__event_emitter__,
+                        f"📝 Pulled {len(note_chunks)} note chunks")
+                    all_text.extend(note_chunks)
+                    source_log.append(f"notes:{len(note_chunks)}")
 
             if use_mcp_auto:
                 servers = self._load_mcp_servers()
@@ -1694,6 +1826,21 @@ class Tools:
 
             if not isinstance(sections, list) or not sections:
                 return "❌ sections_json must be a non-empty array"
+
+            # HARD CAP on section count per format (user policy v9).
+            # Truncate silently so the LLM doesn't waste tokens on extra sections
+            # that would be dropped; emit an info status so user knows.
+            original_count = len(sections)
+            if format == "pptx" and original_count > self.MAX_SLIDES_PPTX:
+                sections = sections[: self.MAX_SLIDES_PPTX]
+                await self._emit(__event_emitter__,
+                    f"⚠️ PPTX capped at {self.MAX_SLIDES_PPTX} content slides "
+                    f"(was {original_count}). Showing first {self.MAX_SLIDES_PPTX}.")
+            elif format == "docx" and original_count > self.MAX_PAGES_DOCX:
+                sections = sections[: self.MAX_PAGES_DOCX]
+                await self._emit(__event_emitter__,
+                    f"⚠️ DOCX capped at {self.MAX_PAGES_DOCX} content pages "
+                    f"(was {original_count}). Showing first {self.MAX_PAGES_DOCX}.")
 
             # Resolve image_ids to actual bytes from the store.
             # Accepts either the opaque store id or the display_id (e.g. "IMG1").
@@ -5038,7 +5185,11 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         #   B) {sheet_name, columns:[{header,width}], rows, styles:{header_bg,header_fg,alt_row_bg}}
         sheets = []
         if workbook_spec and isinstance(workbook_spec, dict) and workbook_spec.get("sheets"):
-            for sh in workbook_spec["sheets"]:
+            # Hard cap: 10 sheets max (user policy v9)
+            raw_sheets_list = workbook_spec["sheets"][: self.MAX_SHEETS_XLSX]
+            if len(workbook_spec["sheets"]) > self.MAX_SHEETS_XLSX:
+                print(f"[DocGen] XLSX capped at {self.MAX_SHEETS_XLSX} sheets (was {len(workbook_spec['sheets'])}).")
+            for sh in raw_sheets_list:
                 if not isinstance(sh, dict):
                     continue
                 # Determine columns (with widths)
@@ -5307,15 +5458,16 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
 
         return self._render_xlsx_preview(title, client_name, sheets, data_uri)
 
-    # Hard content caps (2026-04-19 user policy v6):
-    #   PPTX = 100 words per slide  (title + paragraphs + bullets combined)
-    #   DOCX = 300 words per page   (was 500 — reduced to avoid Bedrock Opus
-    #                                 streaming TransferEncodingError on long
-    #                                 sections_json args for multi-page docs)
-    #   XLSX = 50 rows per sheet    (data rows, header excluded)
+    # Hard content caps (2026-04-19 user policy v9):
+    #   PPTX: 100 words/slide, max 15 content slides (+ cover)
+    #   DOCX: 300 words/page,  max 15 content pages (+ cover)
+    #   XLSX: 100 rows/sheet,  max 10 sheets
     MAX_WORDS_PPTX = 100
     MAX_WORDS_DOCX = 300
-    MAX_ROWS_XLSX = 50
+    MAX_ROWS_XLSX = 100
+    MAX_SLIDES_PPTX = 15
+    MAX_PAGES_DOCX = 15
+    MAX_SHEETS_XLSX = 10
 
     # ──────────────────────────────────────────────────────────────────────
     # Auto-chart from table data

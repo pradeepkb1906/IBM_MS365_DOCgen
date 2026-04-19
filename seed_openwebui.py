@@ -32,6 +32,27 @@ SPECS = [
         },
     },
     {
+        "name": "prepare_content_from_notes",
+        "description": (
+            "Source mode: OWUI Notes. Reads the user's notes (Notes panel on the "
+            "left side of Open WebUI). Pass note_ids for specific notes, or omit "
+            "to read all notes owned by the current user (most recent 50). "
+            "Returns text chunks for assemble_document. No image fetching."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic/question — used to rank note excerpts."},
+                "note_ids": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Optional. OWUI note IDs. Omit to pull all user's notes.",
+                },
+                "max_chunks": {"type": "integer", "description": "Max text chunks (default 12)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "prepare_content_from_attachments",
         "description": (
             "Source mode: Chat Attachments. Extracts text AND images from ALL files attached "
