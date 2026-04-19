@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 18:25 IST (max_tokens=80000, builtins off, narrate-progress rule)
+# Last synced to OWUI DB: 2026-04-19 18:45 IST (DOCX preview footer: IBM logo left + Page N of M right, visible in iframe)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -4865,14 +4865,37 @@ class Tools:
     def _render_docx_preview(self, title, client_name, sections, data_uri):
         safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:50] or "document"
 
+        # IBM logo for the preview footer (inline data URI so it renders in the iframe)
+        logo_png = self._get_ibm_logo_png()
+        logo_img_tag = ""
+        if logo_png:
+            logo_b64 = base64.b64encode(logo_png).decode()
+            logo_img_tag = f'<img src="data:image/png;base64,{logo_b64}" style="height:28px;width:auto" alt="IBM"/>'
+
+        def footer_html(page_num: int, total_pages: int) -> str:
+            """Reusable page footer — IBM logo left, Page N of M right."""
+            return (
+                '<div style="position:absolute;bottom:24px;left:60px;right:60px;'
+                'display:flex;align-items:center;justify-content:space-between;'
+                'padding-top:12px;border-top:1px solid #E0E0E0;'
+                'font-family:\\"IBM Plex Sans\\",Calibri,sans-serif;'
+                'font-size:10px;color:#525252">'
+                f'<div>{logo_img_tag}</div>'
+                f'<div>Page {page_num} of {total_pages}</div>'
+                '</div>'
+            )
+
+        total_pages = 1 + len(sections)  # cover + content pages
+
         # Build page HTML
         page_parts = []
         # Cover
         page_parts.append(
-            f'<div class="pg" style="display:block;padding:80px 60px;background:#fff;min-height:9in">'
-            f'<div style="font-size:36px;font-weight:700;color:{IBM_BLUE_60};margin-bottom:24px">{self._html_esc(title)}</div>'
-            f'<div style="font-size:18px;color:{IBM_GRAY_70};margin-bottom:8px">IBM Consulting  |  Prepared for {self._html_esc(client_name)}</div>'
-            f'<div style="font-size:14px;color:{IBM_GRAY_70}">{time.strftime("%B %Y")}</div>'
+            f'<div class="pg" style="display:block;padding:80px 60px 80px;background:#fff;min-height:9in;position:relative">'
+            f'<div style="font-size:36px;font-weight:700;color:{IBM_BLUE_60};margin-bottom:24px;font-family:\\"IBM Plex Sans\\",Calibri,sans-serif">{self._html_esc(title)}</div>'
+            f'<div style="font-size:18px;color:{IBM_GRAY_70};margin-bottom:8px;font-family:\\"IBM Plex Sans\\",Calibri,sans-serif">IBM Consulting  |  Prepared for {self._html_esc(client_name)}</div>'
+            f'<div style="font-size:14px;color:{IBM_GRAY_70};font-family:\\"IBM Plex Sans\\",Calibri,sans-serif">{time.strftime("%B %Y")}</div>'
+            f'{footer_html(1, total_pages)}'
             f'</div>'
         )
 
@@ -4930,9 +4953,13 @@ class Tools:
                     )
                     + '</div>'
                 )
+            page_num = idx + 1  # cover is page 1, sections start at page 2
             page_parts.append(
-                f'<div class="pg" style="display:none;padding:60px;background:#fff;min-height:9in;'
-                f'page-break-after:always">{"".join(parts)}</div>'
+                f'<div class="pg" style="display:none;padding:60px 60px 80px;background:#fff;min-height:9in;'
+                f'position:relative;page-break-after:always">'
+                f'{"".join(parts)}'
+                f'{footer_html(page_num, total_pages)}'
+                f'</div>'
             )
 
         total = len(page_parts)

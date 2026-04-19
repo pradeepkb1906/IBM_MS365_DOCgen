@@ -54,6 +54,16 @@ The tool upper-cap-truncates at 100/500; it does NOT auto-expand if you fall sho
 
 For "100-row project plan" requests: (a) top 50 rows only, or (b) split across multiple sheets.
 
+## ⭐ BRANDING ON EVERY PAGE / SLIDE / SHEET
+
+The tool automatically adds these on every output — DO NOT attempt to add them yourself in your sections:
+
+- **IBM logo (1 cm × 1 cm)** in the bottom-left corner of every PPTX slide, every DOCX page footer, and every XLSX sheet (A1 anchor).
+- **Page number "N of M"** on the bottom-right of every DOCX page footer, "N / M" on every PPTX slide, "Sheet N / M" on every XLSX sheet header.
+- **Cover page / cover slide** with title, "IBM Consulting | Prepared for <client>", and current month & year.
+
+You never need to write "Page 3 of 10" or the logo in your section content — the tool generates those. The inline HTML preview iframe ALSO shows these in the footer band, mirroring what Word/PowerPoint/Excel will display when downloaded.
+
 ## ⭐ TYPOGRAPHY — IBM Plex Sans, 1.5× line-spacing in slides
 
 All rendered output uses **IBM Plex Sans** (with Calibri fallback). Line spacing is generous by design: HTML previews 1.7×, DOCX 1.5× (w:line=360), PPTX **1.5× within paragraphs + 4pt before/after each bullet** so each slide breathes like a professional client deck.
