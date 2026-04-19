@@ -5454,7 +5454,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         """For any section with a numeric table AND no existing image, render a
         chart PNG and attach as the section's image.
 
-        Respects a per-section `chart_type` field: "bar" | "pie" | "line" | "auto".
+        Respects a per-section chart_type field: "bar" | "pie" | "line" | "auto".
         If the section has "chart_data" (alternative to table for pure chart intent),
         use that directly; otherwise derive from the table.
         """
@@ -6304,7 +6304,7 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         if not emitter:
             return
         try:
-            # First emit after 1s so user sees the ETA quickly, then every `interval`.
+            # First emit after 1s so user sees the ETA quickly, then every 'interval'.
             await asyncio.sleep(1)
             while True:
                 elapsed = int(time.time() - (self._phase_started or time.time()))
