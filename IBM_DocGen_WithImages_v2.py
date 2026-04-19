@@ -1770,6 +1770,10 @@ class Tools:
                 await self._emit(__event_emitter__,
                     f"⚠️ {len(missing_images)} image(s) expired/missing — continuing without them")
 
+            # Enforce content caps per format:
+            #   PPTX: 40 words/slide, DOCX: 200 words/page, XLSX: 50 rows/sheet
+            resolved_sections = self._enforce_content_caps(resolved_sections, format)
+
             if format == "docx":
                 html_response = self._build_and_render_docx(
                     session_id, title, client_name, resolved_sections, __event_emitter__
@@ -4992,12 +4996,17 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 elif sh.get("headers"):
                     for h in sh["headers"]:
                         cols.append({"header": str(h), "width": None})
+                raw_rows = [list(r) for r in (sh.get("rows") or [])]
+                capped_rows = raw_rows[:self.MAX_ROWS_XLSX]
                 sheets.append({
                     "title": str(sh.get("title") or sh.get("sheet_name") or "Sheet"),
                     "columns": cols,
                     "headers": [c["header"] for c in cols],
-                    "rows": [list(r) for r in (sh.get("rows") or [])],
-                    "notes": str(sh.get("notes") or ""),
+                    "rows": capped_rows,
+                    "notes": str(sh.get("notes") or "") + (
+                        f"  (truncated from {len(raw_rows)} to {self.MAX_ROWS_XLSX} rows)"
+                        if len(raw_rows) > self.MAX_ROWS_XLSX else ""
+                    ),
                     "styles": sh.get("styles") or {},
                 })
         else:
@@ -5209,6 +5218,104 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         )
 
         return self._render_xlsx_preview(title, client_name, sheets, data_uri)
+
+    # Hard content caps (2026-04-19 user policy: keep deck short, punchy, fast):
+    #   PPTX = 40 words per slide   (title + paragraphs + bullets combined)
+    #   DOCX = 200 words per page   (paragraphs + bullets combined)
+    #   XLSX = 50 rows per sheet    (data rows, header excluded)
+    MAX_WORDS_PPTX = 40
+    MAX_WORDS_DOCX = 200
+    MAX_ROWS_XLSX = 50
+
+    def _enforce_content_caps(self, sections: list, fmt: str) -> list:
+        """Truncate each section's text/rows so the rendered output respects
+        the hard content caps. Pure defensive — the system prompt asks the LLM
+        to stay under, but we never exceed even if the LLM forgets.
+        """
+        out = []
+        if fmt == "pptx":
+            limit = self.MAX_WORDS_PPTX
+            for s in sections:
+                if not isinstance(s, dict): out.append(s); continue
+                ns = dict(s)
+                # Count words (excluding image caption / speaker notes — those are separate)
+                title = ns.get("title") or ""
+                paras = list(ns.get("paragraphs") or [])
+                bullets = list(ns.get("bullets") or [])
+                used = len(title.split())
+                new_paras, new_bullets = [], []
+                for p in paras:
+                    w = (p or "").split()
+                    if used + len(w) <= limit:
+                        new_paras.append(p); used += len(w)
+                    else:
+                        remaining = max(0, limit - used)
+                        if remaining > 3:
+                            new_paras.append(" ".join(w[:remaining]) + "…")
+                            used = limit
+                        break
+                for b in bullets:
+                    w = (b or "").split()
+                    if used + len(w) <= limit:
+                        new_bullets.append(b); used += len(w)
+                    else:
+                        remaining = max(0, limit - used)
+                        if remaining > 2:
+                            new_bullets.append(" ".join(w[:remaining]) + "…")
+                            used = limit
+                        break
+                ns["paragraphs"] = new_paras
+                ns["bullets"] = new_bullets
+                out.append(ns)
+        elif fmt == "docx":
+            limit = self.MAX_WORDS_DOCX
+            for s in sections:
+                if not isinstance(s, dict): out.append(s); continue
+                ns = dict(s)
+                title = ns.get("title") or ""
+                paras = list(ns.get("paragraphs") or [])
+                bullets = list(ns.get("bullets") or [])
+                used = len(title.split())
+                new_paras, new_bullets = [], []
+                for p in paras:
+                    w = (p or "").split()
+                    if used + len(w) <= limit:
+                        new_paras.append(p); used += len(w)
+                    else:
+                        remaining = max(0, limit - used)
+                        if remaining > 5:
+                            new_paras.append(" ".join(w[:remaining]) + "…")
+                            used = limit
+                        break
+                for b in bullets:
+                    w = (b or "").split()
+                    if used + len(w) <= limit:
+                        new_bullets.append(b); used += len(w)
+                    else:
+                        remaining = max(0, limit - used)
+                        if remaining > 3:
+                            new_bullets.append(" ".join(w[:remaining]) + "…")
+                            used = limit
+                        break
+                ns["paragraphs"] = new_paras
+                ns["bullets"] = new_bullets
+                out.append(ns)
+        elif fmt == "xlsx":
+            # For XLSX we also cap any inline table inside a section at MAX_ROWS_XLSX rows.
+            # The main row cap is applied per-sheet in _build_and_render_xlsx too.
+            limit = self.MAX_ROWS_XLSX
+            for s in sections:
+                if not isinstance(s, dict): out.append(s); continue
+                ns = dict(s)
+                tbl = ns.get("table")
+                if isinstance(tbl, dict) and tbl.get("rows"):
+                    rows = tbl["rows"]
+                    if len(rows) > limit:
+                        ns["table"] = {**tbl, "rows": rows[:limit]}
+                out.append(ns)
+        else:
+            return list(sections)
+        return out
 
     def _sanitize_sheet_name(self, name: str, idx: int = 0) -> str:
         # Excel sheet names: ≤31 chars, no : \ / ? * [ ]
