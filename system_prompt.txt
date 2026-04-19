@@ -351,6 +351,21 @@ The tool can pull source material from SIX places inside Open WebUI:
 
 **Fast shortcut** — call `prepare_content_smart(query)` with no other args. It auto-pulls from: chat attachments (`__files__`), knowledge collection (if you pass `knowledge_collection_id`), OWUI Notes (all user's notes by default), a specific folder (if you pass `folder_id`), MCP servers (if configured). You can opt-out with `use_notes=False` / `use_mcp_auto=False`.
 
+## ⭐ 50/50 KB-vision layout (auto, when attachments present)
+
+When the user has attached files to the chat AND you call `assemble_document` for a DOCX or PPTX, the tool **automatically**:
+
+1. Fetches each attachment (PDF / DOCX / PPTX / XLSX)
+2. For PDFs: sends them as native Anthropic document blocks to Claude Vision (Plan B)
+3. If that fails (Bedrock/litellm rejects document blocks): extracts images from Office attachments via `zipfile` stdlib (Plan C)
+4. For each section you emit, Claude Vision picks the ONE best-matching page (Plan B) or image (Plan C) with a 0-100 relevance score
+5. Sections scoring **≥ 95** render as a **50/50 split**:
+   - **Left half**: your generated heading + paragraphs + bullets
+   - **Right half**: the matched KB image (Plan C) or a styled reference card with page # + caption (Plan B)
+6. Sections scoring < 95 fall back to text-only full width — **no weak matches ever ship**
+
+You don't call any extra tool. Just write good section titles and bullets (so Vision can match them well) and call `assemble_document` as usual. The tool handles everything.
+
 ## Attachments — chat-attached files work automatically
 
 If the user has attached files to the chat, you do NOT need to pass `attachment_file_ids` to `prepare_content_smart` or `prepare_content_from_attachments`. The tool auto-detects them from OWUI's `__files__` injection. Just call the method with the query.

@@ -636,6 +636,14 @@ class Tools:
             default=512,
             description="Longest-edge px for the thumbnail sent to the vision model. Smaller = cheaper/faster.",
         )
+        enable_kb_vision_layout: bool = Field(default=True,
+            description="When attachments are present, auto-build 50/50 pages/slides: left = generated text, right = Claude-Vision-matched image (or reference card) from the KB.")
+        kb_vision_score_threshold: int = Field(default=95,
+            description="Min score 0-100 from Claude Vision to accept a KB match. Below = section falls back to text-only full-width.")
+        kb_max_candidates_per_section: int = Field(default=5,
+            description="Max candidate images sent to Claude Vision per section (Plan C).")
+        kb_plan_b_enabled: bool = Field(default=True,
+            description="Try Anthropic native PDF document block first. If Bedrock/litellm rejects it, fall back to Plan C zipfile extraction.")
     def __init__(self):
         self.valves = self.Valves()
         self._logo_png_cache: Optional[bytes] = None
@@ -1488,6 +1496,8 @@ class Tools:
         workbook_json: Optional[str] = None,
         __user__: Optional[dict] = None,
         __event_emitter__=None,
+        __files__=None,
+        __request__=None,
     ):
         """Build and render the final DOCX, PPTX or XLSX inline in chat."""
         try:
@@ -1553,6 +1563,16 @@ class Tools:
             if format in ("docx", "pptx", "xlsx"):
                 resolved_sections = self._autoinject_charts(resolved_sections)
             resolved_sections = self._enforce_content_caps(resolved_sections, format)
+            if format in ("docx", "pptx") and __files__:
+                auto_ids = []
+                for f in __files__:
+                    if isinstance(f, dict):
+                        fid = f.get("id") or (f.get("file") or {}).get("id")
+                        if fid: auto_ids.append(fid)
+                if auto_ids:
+                    auth = self._auth_from_request(__request__)
+                    resolved_sections = await self._kb_enrich_sections(
+                        resolved_sections, auto_ids, auth, __event_emitter__)
             if format == "docx":
                 html_response = self._build_and_render_docx(
                     session_id, title, client_name, resolved_sections, __event_emitter__
@@ -2794,6 +2814,186 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] vision rank async failed: {e}")
             return images
+    def _fetch_attachment_bytes(self, file_ids, auth):
+        out = []
+        base = self.valves.owui_base_url
+        h = {**(auth or {})}
+        for fid in file_ids or []:
+            try:
+                meta_r = requests.get(f"{base}/api/v1/files/{fid}", headers=h, timeout=10)
+                fname = (meta_r.json().get("filename") or fid) if meta_r.ok else fid
+                ext = ("." + fname.rsplit(".", 1)[-1].lower()) if "." in fname else ""
+                if ext not in (".pdf", ".docx", ".pptx", ".xlsx"): continue
+                r = requests.get(f"{base}/api/v1/files/{fid}/content", headers=h,
+                                 timeout=self.valves.request_timeout)
+                if r.status_code == 200 and r.content:
+                    out.append((fname, ext, r.content))
+            except Exception as e:
+                print(f"[DocGen] fetch attachment {fid} failed: {e}")
+        return out
+    def _extract_office_images(self, office_attachments):
+        """Zipfile-extract images + surrounding text context from DOCX/PPTX/XLSX."""
+        out = []
+        strip_tags = lambda s: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
+        media_prefix = lambda ext: {".docx": "word/media/", ".pptx": "ppt/media/",
+                                     ".xlsx": "xl/media/"}.get(ext, "")
+        img_ok = lambda n: any(n.lower().endswith(e) for e in (".png", ".jpg", ".jpeg", ".gif", ".webp"))
+        for fname, ext, data in office_attachments:
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(data))
+                parts = []
+                for n in zf.namelist():
+                    if not n.endswith(".xml"): continue
+                    if not any(n.startswith(p) for p in ("word/document", "ppt/slides/", "xl/worksheets/")):
+                        continue
+                    try:
+                        cleaned = strip_tags(zf.read(n).decode("utf-8", errors="ignore"))
+                        if cleaned: parts.append(cleaned)
+                    except Exception: pass
+                ctx = (" ".join(parts))[:12000] or fname
+                prefix = media_prefix(ext)
+                if not prefix: continue
+                for n in zf.namelist():
+                    if not n.startswith(prefix) or not img_ok(n): continue
+                    b = zf.read(n)
+                    if len(b) < 2000: continue
+                    out.append({"id": f"{fname}:{n.split('/')[-1]}", "bytes": b,
+                                "source_file": fname, "page": 0, "caption_seed": ctx})
+            except Exception as e:
+                print(f"[DocGen] office extract {fname} failed: {e}")
+        return out
+    def _bm25_prefilter(self, section, candidates, top_n):
+        if not candidates or len(candidates) <= top_n: return list(candidates)
+        tok = lambda s: set(re.findall(r"\w{3,}", (s or "").lower()))
+        q = tok((section.get("title", "") + " " +
+                 " ".join(section.get("bullets", []) or []) + " " +
+                 " ".join(section.get("paragraphs", []) or [])))
+        scored = sorted(((len(q & tok(c.get("caption_seed", ""))), c) for c in candidates),
+                        key=lambda x: x[0], reverse=True)
+        return [c for _, c in scored[:top_n]]
+    def _claude_api_chat(self, messages, auth, timeout=90):
+        """Single-shot Claude call via OWUI's /api/chat/completions. Returns str content or None."""
+        payload = {"model": self.valves.vision_rank_model, "messages": messages,
+                   "temperature": 0.0, "stream": False}
+        url = f"{self.valves.owui_base_url}/api/chat/completions"
+        try:
+            r = requests.post(url, headers={**(auth or {}), "Content-Type": "application/json"},
+                              json=payload, timeout=timeout)
+            if r.status_code >= 400:
+                print(f"[DocGen] Claude API {r.status_code}: {r.text[:200]}")
+                return None
+            text = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if isinstance(text, list):
+                text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+            return text
+        except Exception as e:
+            print(f"[DocGen] Claude API error: {e}")
+            return None
+    def _parse_match_json(self, text):
+        if not text: return None
+        _f = chr(96) * 3
+        text = re.sub(_f + r"(?:json)?|" + _f, "", text, flags=re.I).strip()
+        m = re.search(r"\{.*\}", text, flags=re.S)
+        if m: text = m.group(0)
+        try: return json.loads(text)
+        except Exception: return None
+    def _plan_b_match(self, section, pdf_attachments, auth):
+        """Plan B: attach PDFs as native Anthropic document blocks. Return ref-card match or None."""
+        if not pdf_attachments: return None
+        title = section.get("title", "")
+        bullets = " | ".join((section.get("bullets", []) or [])[:5])
+        prompt = (f'Section title: "{title}"\nKey points: {bullets}\n\n'
+                  "You have the user's attached PDF(s). Identify the ONE page that best illustrates this section. "
+                  'Return ONLY JSON: {"source_file":"<fname>","page":<int 1-based>,"score":<0-100>,"caption":"<=15 words"}\n'
+                  "95-100 = perfect topical match; <95 = weak.")
+        content = [{"type": "text", "text": prompt}]
+        for fname, _ext, data in pdf_attachments[:3]:
+            content.append({"type": "text", "text": f"--- PDF: {fname} ---"})
+            content.append({"type": "document",
+                            "source": {"type": "base64", "media_type": "application/pdf",
+                                       "data": base64.b64encode(data).decode("ascii")}})
+        text = self._claude_api_chat([{"role": "user", "content": content}], auth, timeout=120)
+        parsed = self._parse_match_json(text)
+        if not parsed: return None
+        return {"source_file": str(parsed.get("source_file", ""))[:120],
+                "page": int(parsed.get("page", 0) or 0),
+                "score": float(parsed.get("score", 0) or 0),
+                "caption": str(parsed.get("caption", "")).strip()[:200],
+                "type": "reference"}
+    def _plan_c_match(self, section, candidates, auth):
+        """Plan C: send image candidates to Claude Vision, pick the best."""
+        if not candidates: return None
+        image_parts = []
+        for i, c in enumerate(candidates[:self.valves.kb_max_candidates_per_section]):
+            try:
+                thumb = self._png_thumbnail(c["bytes"], self.valves.vision_rank_thumb_px)
+                b64 = base64.b64encode(thumb).decode("ascii")
+                image_parts.append((i, b64, c))
+            except Exception: pass
+        if not image_parts: return None
+        title = section.get("title", "")
+        bullets = " | ".join((section.get("bullets", []) or [])[:5])
+        prompt = (f'Section title: "{title}"\nKey points: {bullets}\n\n'
+                  f"You see {len(image_parts)} candidate images from the user's knowledge base. "
+                  "Pick the ONE that best ILLUSTRATES this section (not one that just repeats the text). Score 0-100:\n"
+                  '  95-100 = perfectly illustrates; 70-94 = related; <70 = weak\n'
+                  'Return ONLY JSON: {"best_idx":<int>,"score":<0-100>,"caption":"<=15 words"}')
+        content = [{"type": "text", "text": prompt}]
+        for idx, b64, _c in image_parts:
+            content.append({"type": "text", "text": f"Image {idx}:"})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+        text = self._claude_api_chat([{"role": "user", "content": content}], auth, timeout=90)
+        parsed = self._parse_match_json(text)
+        if not parsed: return None
+        try: idx = int(parsed.get("best_idx", -1))
+        except Exception: return None
+        hit = next((c for i, _b, c in image_parts if i == idx), None)
+        if not hit: return None
+        return {"image_bytes": hit["bytes"], "source_file": hit["source_file"],
+                "score": float(parsed.get("score", 0) or 0),
+                "caption": str(parsed.get("caption", "")).strip()[:200],
+                "type": "image"}
+    async def _kb_enrich_sections(self, sections, file_ids, auth, __event_emitter__=None):
+        """Enrich each section with a KB match (Plan B first, Plan C fallback). 95 threshold."""
+        if not file_ids or not self.valves.enable_kb_vision_layout or not sections:
+            return sections
+        try: await self._emit(__event_emitter__, f"📎 Indexing {len(file_ids)} attachment(s) for 50/50 layout...")
+        except Exception: pass
+        attachments = await asyncio.to_thread(self._fetch_attachment_bytes, file_ids, auth)
+        if not attachments: return sections
+        pdfs = [a for a in attachments if a[1] == ".pdf"]
+        office = [a for a in attachments if a[1] in (".docx", ".pptx", ".xlsx")]
+        office_images = await asyncio.to_thread(self._extract_office_images, office) if office else []
+        # Probe Plan B once
+        plan_b_ok = False
+        if pdfs and self.valves.kb_plan_b_enabled:
+            probe = await asyncio.to_thread(self._plan_b_match, sections[0], pdfs, auth)
+            plan_b_ok = probe is not None
+            try: await self._emit(__event_emitter__,
+                ("✅ Plan B active (PDF document blocks)" if plan_b_ok
+                 else f"⚠️ Plan B unsupported — falling back to Plan C ({len(office_images)} KB images)"))
+            except Exception: pass
+        thr = int(self.valves.kb_vision_score_threshold)
+        async def match_one(s):
+            try:
+                if plan_b_ok:
+                    m = await asyncio.to_thread(self._plan_b_match, s, pdfs, auth)
+                    if m and m["score"] >= thr: return m
+                if office_images:
+                    top = self._bm25_prefilter(s, office_images, self.valves.kb_max_candidates_per_section)
+                    m = await asyncio.to_thread(self._plan_c_match, s, top, auth)
+                    if m and m["score"] >= thr: return m
+            except Exception as e:
+                print(f"[DocGen] KB match error: {e}")
+            return None
+        results = await asyncio.gather(*[match_one(s) for s in sections], return_exceptions=True)
+        for s, m in zip(sections, results):
+            if isinstance(m, dict): s["_kb_match"] = m
+        accepted = sum(1 for s in sections if s.get("_kb_match"))
+        try: await self._emit(__event_emitter__,
+            f"👁️ KB vision layout: {accepted}/{len(sections)} sections matched ≥{thr}/100")
+        except Exception: pass
+        return sections
     def _rank_images(self, query, images):
         q_tokens = set(re.findall(r"\w{3,}", query.lower()))
         scored = []
@@ -3208,7 +3408,89 @@ class Tools:
             align="left", after=120
         ))
         doc_parts.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
+        def kb_right_cell_xml(kb):
+            """Build the inner XML of the right cell in a 50/50 layout (image or ref card)."""
+            parts = []
+            if kb.get("image_bytes"):
+                idx = len(media_files)
+                fn = f"kb_image_{idx+1}.png"
+                media_files.append((fn, kb["image_bytes"]))
+                rid = f"rIdKbImg{idx}"
+                rel_entries.append(
+                    f'<Relationship Id="{rid}" '
+                    f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                    f'Target="media/{fn}"/>'
+                )
+                w_emu, h_emu = 3200000, 2400000
+                parts.append(
+                    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+                    '<w:r><w:drawing>'
+                    '<wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+                    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
+                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                    f'<wp:extent cx="{w_emu}" cy="{h_emu}"/>'
+                    f'<wp:docPr id="{idx+2000}" name="KB Image {idx+1}"/>'
+                    '<wp:cNvGraphicFramePr/>'
+                    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+                    '<pic:pic>'
+                    f'<pic:nvPicPr><pic:cNvPr id="{idx+2000}" name="{fn}"/><pic:cNvPicPr/></pic:nvPicPr>'
+                    f'<pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+                    '<pic:spPr>'
+                    f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{w_emu}" cy="{h_emu}"/></a:xfrm>'
+                    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+                    '</pic:spPr></pic:pic></a:graphicData></a:graphic>'
+                    '</wp:inline></w:drawing></w:r></w:p>'
+                )
+                cap = f"{kb.get('caption','')}  ·  {kb.get('source_file','KB')}"[:160]
+                parts.append(para_xml(run_xml(cap, size=16, italic=True, color="525252"),
+                                       align="center", after=60))
+            else:
+                parts.append(para_xml(run_xml(f"📄 {kb.get('source_file','Knowledge base')}",
+                                               size=22, bold=True, color="0F62FE"),
+                                       align="left", after=120))
+                parts.append(para_xml(run_xml(
+                    f"Page {kb.get('page','?')}  ·  Match score {int(kb.get('score',0))}/100",
+                    size=18, color="525252"), align="left", after=120))
+                parts.append(para_xml(run_xml(f'"{kb.get("caption","")}"',
+                                               size=20, italic=True, color="161616"),
+                                       align="left", after=60))
+            return "".join(parts)
+        def kb_2col_section_xml(section, kb):
+            """Whole section wrapped as 50/50 w:tbl: left = text, right = image/card."""
+            left = []
+            left.append(heading_xml(section.get("title", ""), level=1))
+            for p in section.get("paragraphs", []) or []:
+                left.append(para_xml(run_xml(p, size=22), align="both"))
+            for b in section.get("bullets", []) or []:
+                left.append(
+                    f'<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'
+                    f'<w:ind w:left="360"/></w:pPr>{run_xml("• " + str(b), size=22)}</w:p>'
+                )
+            if section.get("table"):
+                t = section["table"]
+                left.append(table_xml(t.get("headers", []), t.get("rows", [])))
+            return (
+                '<w:tbl>'
+                '<w:tblPr><w:tblW w:w="5000" w:type="pct"/>'
+                '<w:tblBorders><w:top w:val="nil"/><w:bottom w:val="nil"/><w:left w:val="nil"/>'
+                '<w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>'
+                '</w:tblPr>'
+                '<w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>'
+                '<w:tr>'
+                '<w:tc><w:tcPr><w:tcW w:w="2500" w:type="pct"/></w:tcPr>'
+                + "".join(left) +
+                '</w:tc>'
+                '<w:tc><w:tcPr><w:tcW w:w="2500" w:type="pct"/></w:tcPr>'
+                + kb_right_cell_xml(kb) +
+                '</w:tc>'
+                '</w:tr></w:tbl>'
+            )
         for idx, section in enumerate(sections, start=1):
+            if section.get("_kb_match"):
+                doc_parts.append(kb_2col_section_xml(section, section["_kb_match"]))
+                doc_parts.append(para_xml("", after=240))
+                continue
             sec_title = section.get("title", f"Section {idx}")
             doc_parts.append(heading_xml(sec_title, level=1))
             for para in section.get("paragraphs", []) or []:
@@ -3459,10 +3741,30 @@ class Tools:
                     + '</div>'
                 )
             page_num = idx + 1
+            kb = section.get("_kb_match")
+            if kb:
+                if kb.get("image_bytes"):
+                    img_b64 = base64.b64encode(kb["image_bytes"]).decode()
+                    right = (f'<img src="data:image/png;base64,{img_b64}" '
+                             f'style="max-width:100%;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.1)"/>'
+                             f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
+                             f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
+                else:
+                    right = (f'<div style="padding:20px;border:2px solid {IBM_BLUE_60};border-radius:8px;background:#F4F8FF">'
+                             f'<div style="font-size:14px;color:{IBM_BLUE_60};font-weight:700;margin-bottom:8px">📄 {self._html_esc(kb.get("source_file",""))}</div>'
+                             f'<div style="font-size:11px;color:{IBM_GRAY_70};margin-bottom:12px">Page {kb.get("page","?")}  ·  Match score {int(kb.get("score",0))}/100</div>'
+                             f'<div style="font-size:12px;color:{IBM_GRAY_100};font-style:italic;line-height:1.5">"{self._html_esc(kb.get("caption",""))}"</div>'
+                             f'</div>')
+                page_body = (f'<div style="display:flex;gap:24px">'
+                             f'<div style="flex:1;min-width:0">{"".join(parts)}</div>'
+                             f'<div style="flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center">{right}</div>'
+                             f'</div>')
+            else:
+                page_body = "".join(parts)
             page_parts.append(
                 f'<div class="pg" style="display:none;padding:60px 60px 80px;background:#fff;min-height:9in;'
                 f'position:relative;page-break-after:always">'
-                f'{"".join(parts)}'
+                f'{page_body}'
                 f'{footer_html(page_num, total_pages)}'
                 f'</div>'
             )
@@ -4490,8 +4792,9 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
                         section.get("title", f"Section {idx}"),
                         size=2600, bold=True, color="161616")
             )
+            has_kb = bool(section.get("_kb_match"))
             has_chart = bool(section.get("_chart_spec"))
-            has_image = bool(section.get("_img_bytes")) or has_chart
+            has_image = bool(section.get("_img_bytes")) or has_chart or has_kb
             text_x = 457200
             text_y = 1143000
             text_w = 5943600 if has_image else 11277600
@@ -4517,7 +4820,34 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
                     f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>'
                     f'<p:txBody><a:bodyPr wrap="square" anchor="t"/><a:lstStyle/>{body}</p:txBody></p:sp>'
                 )
-            if has_chart:
+            if has_kb:
+                kb = section["_kb_match"]
+                ch_x, ch_y, ch_w = 6629400, 1143000, 5105400
+                if kb.get("image_bytes"):
+                    media_idx = len(media_files)
+                    fname_kb = f"kb_image_{media_idx+1}.png"
+                    media_files.append((fname_kb, kb["image_bytes"]))
+                    rid = f"rId{len(slide_rel_entries)+2}"
+                    slide_rel_entries.append(
+                        f'<Relationship Id="{rid}" '
+                        f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                        f'Target="../media/{fname_kb}"/>'
+                    )
+                    shapes.append(image_xml(rid, ch_x, ch_y, ch_w, 3600000))
+                    cap = (f"📎 {kb.get('caption','')}  ·  from {kb.get('source_file','KB')}")[:120]
+                    shapes.append(txt_box(ch_x, ch_y + 3600000 + 50000, ch_w, 400000,
+                                           cap, size=900, color="525252"))
+                else:
+                    card_title = f"📄 {kb.get('source_file','Knowledge base')}"
+                    shapes.append(txt_box(ch_x, ch_y, ch_w, 457200, card_title,
+                                           size=1400, bold=True, color="0F62FE"))
+                    shapes.append(txt_box(ch_x, ch_y + 500000, ch_w, 400000,
+                                           f"Page {kb.get('page','?')}  ·  score {int(kb.get('score',0))}/100",
+                                           size=1100, color="525252"))
+                    shapes.append(txt_box(ch_x, ch_y + 1000000, ch_w, 2500000,
+                                           f'"{kb.get("caption","")}"',
+                                           size=1300, color="161616"))
+            elif has_chart:
                 ch_x = 6629400
                 ch_y = 1143000
                 ch_w = 5105400
@@ -4784,8 +5114,9 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
             f'</div>'
         )
         for idx, section in enumerate(sections, start=1):
+            has_kb = bool(section.get("_kb_match"))
             has_chart = bool(section.get("_chart_spec"))
-            has_img = bool(section.get("_img_bytes")) or has_chart
+            has_img = bool(section.get("_img_bytes")) or has_chart or has_kb
             text_col_w = "50%" if has_img else "100%"
             text_html = f'<h2 style="font-size:26px;color:{IBM_GRAY_100};font-weight:700;margin:0 0 16px">{self._html_esc(section.get("title", ""))}</h2>'
             for p in section.get("paragraphs", []) or []:
@@ -4798,7 +5129,23 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
                 )
                 text_html += f'<ul style="padding-left:20px;margin:8px 0">{lis}</ul>'
             img_html = ""
-            if has_chart:
+            if has_kb:
+                kb = section["_kb_match"]
+                if kb.get("image_bytes"):
+                    b64 = base64.b64encode(kb["image_bytes"]).decode()
+                    inner = (f'<img src="data:image/png;base64,{b64}" '
+                             f'style="max-width:100%;max-height:55vh;border-radius:4px;object-fit:contain"/>'
+                             f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
+                             f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
+                else:
+                    inner = (f'<div style="padding:24px;border:2px solid {IBM_BLUE_60};border-radius:8px;background:#F4F8FF">'
+                             f'<div style="font-size:15px;color:{IBM_BLUE_60};font-weight:700;margin-bottom:10px">📄 {self._html_esc(kb.get("source_file",""))}</div>'
+                             f'<div style="font-size:12px;color:{IBM_GRAY_70};margin-bottom:14px">Page {kb.get("page","?")}  ·  Match score {int(kb.get("score",0))}/100</div>'
+                             f'<div style="font-size:13px;color:{IBM_GRAY_100};font-style:italic;line-height:1.5">"{self._html_esc(kb.get("caption",""))}"</div>'
+                             f'</div>')
+                img_html = (f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
+                            f'{inner}</div>')
+            elif has_chart:
                 svg = self._svg_chart_from_spec(section["_chart_spec"], width=520, height=300)
                 img_html = (
                     f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
