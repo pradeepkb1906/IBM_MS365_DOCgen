@@ -1,5 +1,5 @@
 """
-# Last synced to OWUI DB: 2026-04-19 16:30 IST (HARD CAP: 1 hero image per deck + 15s enrich timeout)
+# Last synced to OWUI DB: 2026-04-19 17:05 IST (speed: no-retry HTTP, 8s enrich timeout, disable-enrichment valve)
 title: IBM DocGen with Images (MCP-aware)
 author: Deepu
 version: 2.0
@@ -864,7 +864,11 @@ class Tools:
         )
         skip_vision_rank_for_web: bool = Field(
             default=True,
-            description="When source is web/DuckDuckGo and the query was targeted (e.g. 'Red Fort Delhi'), skip the vision-ranking round-trip — trust the search. Big latency win. Attachment/knowledge sources still run vision ranking.",
+            description="When source is web/DuckDuckGo and the query was targeted (e.g. 'Red Fort Delhi'), skip the vision-ranking round-trip — trust the search. Big latency win.",
+        )
+        disable_image_enrichment: bool = Field(
+            default=False,
+            description="When TRUE, enrich_sections_with_images returns immediately with all sections text-only — no web image fetch, no placeholder generation. Use this if image fetching is your latency bottleneck. Users can still explicitly request images and the LLM can call generate_image() for one hero image.",
         )
         security_level: Literal["strict", "balanced", "none"] = Field(default="strict")
         vision_rank_enabled: bool = Field(
@@ -894,16 +898,12 @@ class Tools:
         # connections alive, so a batch of image fetches from the same host
         # (Wikimedia, Unsplash, CDN, etc.) reuses the socket instead of
         # re-handshaking every time. Yields 2-5x speedup on parallel ingest.
+        # No retries — fail fast. With retry=1 and timeout=3s, a slow host costs
+        # 6s wall-clock. Without retry, 3s hard ceiling per URL. User wants speed
+        # over resilience here; if Wikimedia is slow, fall through to DDG/placeholder.
         from requests.adapters import HTTPAdapter
-        try:
-            from urllib3.util.retry import Retry
-            _retry = Retry(total=1, backoff_factor=0.2, status_forcelist=[502, 503, 504])
-        except Exception:
-            _retry = None
         self._http = requests.Session()
-        _adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16,
-                                max_retries=_retry) if _retry else HTTPAdapter(
-                                pool_connections=16, pool_maxsize=16)
+        _adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
         self._http.mount("http://", _adapter)
         self._http.mount("https://", _adapter)
 
@@ -1914,8 +1914,18 @@ class Tools:
             if not isinstance(sections, list) or not sections:
                 return json.dumps({"error": "sections_json must be a non-empty array"})
 
+            # Fast path: if enrichment is disabled globally, return sections unchanged
+            if self.valves.disable_image_enrichment:
+                await self._emit(__event_emitter__,
+                    "⚡ Image enrichment disabled (valve) — shipping text-only", done=True)
+                return json.dumps({
+                    "sections": sections,
+                    "stats": {"enriched": 0, "failed": 0, "skipped": len(sections), "capped": 0, "disabled": True},
+                    "next_step": "Pass these sections directly to assemble_document.",
+                }, indent=2)
+
             await self._emit(__event_emitter__,
-                f"🎨 Enriching {len(sections)} section(s) with images")
+                f"🎨 Enriching {len(sections)} section(s) with 1 hero image (text-only for the rest)")
             _hb = self._start_heartbeat(__event_emitter__)
 
             # Partition: skip sections that already have imagery; enqueue the rest.
@@ -2019,16 +2029,17 @@ class Tools:
                     image_rec = await asyncio.to_thread(_one, prompt, kind, caption)
                 return (idx, out, prompt, caption, image_rec)
 
-            # Hard wall-clock timeout — if enrichment can't finish in 15 s,
-            # ship what we have (or nothing) and let the deck proceed text-only.
+            # Hard wall-clock timeout — 8 s max. If image fetch doesn't complete
+            # in time, ship text-only and let the deck proceed. User explicitly
+            # prioritizes latency over imagery.
             try:
                 results = await asyncio.wait_for(
                     asyncio.gather(*[_worker(it) for it in to_fetch]),
-                    timeout=15.0,
+                    timeout=8.0,
                 )
             except asyncio.TimeoutError:
                 await self._emit(__event_emitter__,
-                    "⏱️ Image enrichment over 15s — proceeding text-only for speed")
+                    "⏱️ Image enrichment over 8s — proceeding text-only for speed")
                 results = []
 
             # Stitch results back into the enriched array in original order
