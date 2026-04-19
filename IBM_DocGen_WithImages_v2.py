@@ -638,8 +638,8 @@ class Tools:
         )
         enable_kb_vision_layout: bool = Field(default=True,
             description="When attachments are present, auto-build 50/50 pages/slides: left = generated text, right = Claude-Vision-matched image (or reference card) from the KB.")
-        kb_vision_score_threshold: int = Field(default=95,
-            description="Min score 0-100 from Claude Vision to accept a KB match. Below = section falls back to text-only full-width.")
+        kb_vision_score_threshold: int = Field(default=50,
+            description="Min score 0-100 from Claude Vision to accept a KB match. 50 = admit almost any topically-aware image (max coverage — most sections will get an image). 80 = only genuinely related. 95 = only perfect. Raise if images feel off-topic.")
         kb_max_candidates_per_section: int = Field(default=5,
             description="Max candidate images sent to Claude Vision per section (Plan C).")
         kb_plan_b_enabled: bool = Field(default=True,
@@ -2820,6 +2820,27 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] vision rank async failed: {e}")
             return images
+    def _format_sources_line(self, section):
+        """Return 'Source: file.pdf p.3; other.pptx p.7-9' or empty string.
+        Inspects section.sources (LLM-supplied) first, then auto-derives from
+        _kb_match if no explicit sources provided."""
+        srcs = section.get("sources") or []
+        pieces = []
+        for s in srcs if isinstance(srcs, list) else []:
+            if isinstance(s, dict):
+                fn = str(s.get("file") or s.get("filename") or s.get("source", "")).strip()[:120]
+                pg = s.get("page") or s.get("pages") or s.get("page_range")
+                if fn:
+                    pieces.append(f"{fn}" + (f" p.{pg}" if pg else ""))
+            elif isinstance(s, str) and s.strip():
+                pieces.append(s.strip()[:120])
+        if not pieces:
+            kb = section.get("_kb_match") or {}
+            fn = kb.get("source_file")
+            if fn:
+                pg = kb.get("page")
+                pieces.append(f"{fn}" + (f" p.{pg}" if pg else ""))
+        return ("Source: " + "; ".join(pieces)) if pieces else ""
     def _compress_kb_image(self, raw_bytes):
         """Resize to max_dim longest-edge + re-encode as progressive JPEG.
         Typical PNG → JPEG saves 5-10×; KB-image data URI for an iframe
@@ -2966,8 +2987,12 @@ class Tools:
         bullets = " | ".join((section.get("bullets", []) or [])[:5])
         prompt = (f'Section title: "{title}"\nKey points: {bullets}\n\n'
                   f"You see {len(image_parts)} candidate images from the user's knowledge base. "
-                  "Pick the ONE that best ILLUSTRATES this section (not one that just repeats the text). Score 0-100:\n"
-                  '  95-100 = perfectly illustrates; 70-94 = related; <70 = weak\n'
+                  "Pick the ONE that best ILLUSTRATES this section (not one that just repeats the text).\n"
+                  "Scoring scale (be generous — real KB images usually land in the 80-92 band):\n"
+                  '  85-100 = topically related and useful to show alongside the section\n'
+                  '  60-84  = loosely related, same domain but weak fit\n'
+                  '  <60    = irrelevant / decorative / wrong topic\n'
+                  'If any candidate shows the same subject matter as the section title, score it 85+.\n'
                   'Return ONLY JSON: {"best_idx":<int>,"score":<0-100>,"caption":"<=15 words"}')
         content = [{"type": "text", "text": prompt}]
         for idx, b64, _c in image_parts:
@@ -3514,6 +3539,10 @@ class Tools:
         for idx, section in enumerate(sections, start=1):
             if section.get("_kb_match"):
                 doc_parts.append(kb_2col_section_xml(section, section["_kb_match"]))
+                src_line = self._format_sources_line(section)
+                if src_line:
+                    doc_parts.append(para_xml(run_xml(src_line, size=16, italic=True,
+                                                       color="525252"), align="left", after=120))
                 doc_parts.append(para_xml("", after=240))
                 continue
             sec_title = section.get("title", f"Section {idx}")
@@ -3542,6 +3571,10 @@ class Tools:
                     section["_chart_spec"],
                     section.get("image_caption") or section.get("title", ""),
                 )
+            src_line = self._format_sources_line(section)
+            if src_line:
+                doc_parts.append(para_xml(run_xml(src_line, size=16, italic=True,
+                                                   color="525252"), align="left", after=120))
         body_xml = "".join(doc_parts)
         logo_png = self._get_ibm_logo_png()
         footer_ref_xml = ""
@@ -3781,6 +3814,11 @@ class Tools:
                              f'</div>')
             else:
                 page_body = "".join(parts)
+            src_line = self._format_sources_line(section)
+            if src_line:
+                page_body += (f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:14px;'
+                              f'border-top:1px dashed {IBM_GRAY_20};padding-top:8px">'
+                              f'📚 {self._html_esc(src_line)}</div>')
             page_parts.append(
                 f'<div class="pg" style="display:none;padding:60px 60px 80px;background:#fff;min-height:9in;'
                 f'position:relative;page-break-after:always">'
@@ -4918,6 +4956,13 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
                 page_num_x, page_num_y, 914400, 457200,
                 page_num_text, size=900, color="8D8D8D", align="r",
             ))
+            src_line = self._format_sources_line(section)
+            if src_line:
+                src_x = logo_x_emu + logo_w_emu + 2500000 if logo_fname else 457200
+                shapes.append(txt_box(
+                    src_x, SLIDE_H_EMU - 457200 - 114300, 6500000, 457200,
+                    src_line, size=800, color="6F6F6F", align="l",
+                ))
             slide_content = "".join(shapes)
             slides_xml.append((f"slide{slide_num}", slide_content, slide_rel_entries))
         def wrap_slide(content):
@@ -5138,6 +5183,11 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
                     for b in bullets
                 )
                 text_html += f'<ul style="padding-left:20px;margin:8px 0">{lis}</ul>'
+            src_line = self._format_sources_line(section)
+            if src_line:
+                text_html += (f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:12px;'
+                              f'border-top:1px dashed {IBM_GRAY_20};padding-top:6px">'
+                              f'📚 {self._html_esc(src_line)}</div>')
             img_html = ""
             if has_kb:
                 kb = section["_kb_match"]

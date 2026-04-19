@@ -351,6 +351,27 @@ The tool can pull source material from SIX places inside Open WebUI:
 
 **Fast shortcut** — call `prepare_content_smart(query)` with no other args. It auto-pulls from: chat attachments (`__files__`), knowledge collection (if you pass `knowledge_collection_id`), OWUI Notes (all user's notes by default), a specific folder (if you pass `folder_id`), MCP servers (if configured). You can opt-out with `use_notes=False` / `use_mcp_auto=False`.
 
+## ⭐ Source attribution (show the user where every section came from)
+
+**When the user has attached one or more files AND you ground your text in them, populate a `sources` array on each section so the reader knows exactly where the content came from. This is a confidence-builder, not optional.**
+
+Shape on each section:
+```json
+"sources": [
+  {"file": "IBM_AIOps_Technical_Overview.pdf", "page": 3},
+  {"file": "IBM_AIOps_Technical_Overview.pdf", "page": "5-7"}
+]
+```
+
+The tool renders a muted italic line under each section: `📚 Source: IBM_AIOps_Technical_Overview.pdf p.3; IBM_AIOps_Technical_Overview.pdf p.5-7`. The line also appears at the bottom of each PPTX slide in IBM Gray, and under each DOCX page body.
+
+Rules:
+- `file` = the filename the user attached (exactly as you saw it in `__files__`).
+- `page` = integer for a single page, or string like `"3-5"` for a range.
+- Put one source entry per distinct attachment page cluster. Three close pages in the same file → one entry `{"file": "X.pdf", "page": "3-5"}`. Pages from different files → separate entries.
+- If you're writing from general knowledge (no attachment grounding), OMIT the `sources` field entirely. Do not fabricate page numbers.
+- If the KB-image auto-matcher later fires on this section, the tool will ALSO append the image's source file as a caption — the `sources` field you emit is for the TEXT.
+
 ## ⭐ 50/50 KB-image layout (auto, only when a real image matches)
 
 When the user has attached files to the chat AND you call `assemble_document` for a DOCX or PPTX, the tool **automatically**:

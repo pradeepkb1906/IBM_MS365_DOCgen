@@ -254,8 +254,11 @@ SPECS = [
                         '{"title": "...", "paragraphs": [...], "bullets": [...], '
                         '"table": {"headers": [...], "rows": [[...]]} | null, '
                         '"image_id": "IMG1" | null, '
-                        '"svg": "<svg viewBox=...>...</svg>" | null}. '
-                        "If both image_id and svg are present, svg wins."
+                        '"svg": "<svg viewBox=...>...</svg>" | null, '
+                        '"sources": [{"file": "filename.pdf", "page": 3}] | null}. '
+                        "The sources field is OPTIONAL but STRONGLY recommended when the "
+                        "section is grounded in an attached file — it renders a small "
+                        "'Source: file.pdf p.3' line under the section for RAG traceability."
                     ),
                 },
                 "workbook_json": {
