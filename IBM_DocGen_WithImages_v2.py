@@ -2117,8 +2117,8 @@ class Tools:
                     f"⚠️ {len(missing_images)} image(s) expired/missing — continuing without them")
 
             # Strip WEB-image references only (image_id, svg, image_hint); keep
-            # chart_type + chart_data because those drive local matplotlib
-            # rendering from table data — no network involved.
+            # chart_type + chart_data because those drive native OOXML chart
+            # parts built from table data — no network, no matplotlib.
             stripped = []
             for s in resolved_sections:
                 if isinstance(s, dict):
@@ -2131,9 +2131,10 @@ class Tools:
                     stripped.append(s)
             resolved_sections = stripped
 
-            # Auto-inject charts for sections with numeric tables (DOCX + PPTX).
-            # This is LOCAL matplotlib rendering, not a web fetch — very fast (< 100ms).
-            if format in ("docx", "pptx"):
+            # Auto-inject chart specs for sections with numeric tables.
+            # Builders emit these as NATIVE OOXML chart parts (c:chartSpace) —
+            # no matplotlib, no PNG rasterization. HTML preview uses inline SVG.
+            if format in ("docx", "pptx", "xlsx"):
                 resolved_sections = self._autoinject_charts(resolved_sections)
 
             # Enforce content caps per format:
@@ -4955,6 +4956,8 @@ class Tools:
         doc_parts = []          # w:p / w:tbl XML
         media_files = []        # (filename, bytes) embedded in zip
         rel_entries = []        # relationship <Relationship> rows
+        chart_parts = []        # (part_name, xml_bytes) for word/charts/chartN.xml
+        chart_overrides = []    # Content_Types <Override> rows for charts
 
         def esc(s):
             return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
@@ -5055,6 +5058,47 @@ class Tools:
                 cap_run = run_xml(f"Figure — {caption}", size=18, italic=True, color="525252")
                 doc_parts.append(para_xml(cap_run, align="center", after=240))
 
+        def add_chart_xml(spec, caption=None):
+            """Embed a NATIVE OOXML chart (bar/pie/line) in this DOCX.
+            Writes word/charts/chartN.xml, adds rels + Content_Types, and
+            emits a <w:drawing> referencing <c:chart r:id="..."/>.
+            """
+            chart_idx = len(chart_parts) + 1
+            chart_xml_bytes = self._ooxml_chart_part_xml(spec)
+            chart_parts.append((f"word/charts/chart{chart_idx}.xml", chart_xml_bytes))
+            chart_overrides.append(
+                f'<Override PartName="/word/charts/chart{chart_idx}.xml" '
+                f'ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+            )
+            rid = f"rIdChart{chart_idx}"
+            rel_entries.append(
+                f'<Relationship Id="{rid}" '
+                f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" '
+                f'Target="charts/chart{chart_idx}.xml"/>'
+            )
+            # 6 inches wide x 3.3 inches tall — comfortable chart size.
+            w_emu = 5486400
+            h_emu = 3017520
+            doc_parts.append(
+                '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="240" w:after="60"/></w:pPr>'
+                '<w:r><w:drawing>'
+                '<wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                f'<wp:extent cx="{w_emu}" cy="{h_emu}"/>'
+                f'<wp:docPr id="{1000 + chart_idx}" name="Chart {chart_idx}"/>'
+                '<wp:cNvGraphicFramePr/>'
+                '<a:graphic>'
+                '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+                f'<c:chart r:id="{rid}"/>'
+                '</a:graphicData></a:graphic>'
+                '</wp:inline></w:drawing></w:r></w:p>'
+            )
+            if caption:
+                cap_run = run_xml(f"Chart — {caption}", size=18, italic=True, color="525252")
+                doc_parts.append(para_xml(cap_run, align="center", after=240))
+
         # ── Cover page ──
         doc_parts.append(para_xml(run_xml(title, size=56, bold=True, color="0F62FE"),
                                    align="left", after=240, before=1200))
@@ -5095,6 +5139,11 @@ class Tools:
                     section["_img_bytes"],
                     section.get("_img_width", 1200),
                     section.get("_img_height", 800),
+                    section.get("image_caption") or section.get("title", ""),
+                )
+            elif section.get("_chart_spec"):
+                add_chart_xml(
+                    section["_chart_spec"],
                     section.get("image_caption") or section.get("title", ""),
                 )
 
@@ -5213,7 +5262,8 @@ class Tools:
             '<Default Extension="jpg" ContentType="image/jpeg"/>'
             '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
             f'{footer_override}'
-            '</Types>'
+            + "".join(chart_overrides)
+            + '</Types>'
         )
         # Package relationships
         rels_xml = (
@@ -5240,6 +5290,9 @@ class Tools:
                 zf.writestr("word/footer1.xml", footer_xml)
                 zf.writestr("word/_rels/footer1.xml.rels", footer_rels_xml)
             zf.writestr("word/document.xml", doc_xml)
+            # Native OOXML chart parts
+            for part_name, xml_bytes in chart_parts:
+                zf.writestr(part_name, xml_bytes)
             for fname, fbytes in media_files:
                 zf.writestr(f"word/media/{fname}", fbytes)
 
@@ -5330,7 +5383,19 @@ class Tools:
                     tbl += '</tr>'
                 tbl += '</table>'
                 parts.append(tbl)
-            if section.get("_img_bytes"):
+            if section.get("_chart_spec"):
+                svg = self._svg_chart_from_spec(section["_chart_spec"], width=640, height=320)
+                parts.append(
+                    f'<div style="text-align:center;margin:16px 0">'
+                    f'{svg}'
+                    + (
+                        f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:6px">'
+                        f'Chart — {self._html_esc(section.get("image_caption") or "")}</div>'
+                        if section.get("image_caption") else ""
+                    )
+                    + '</div>'
+                )
+            elif section.get("_img_bytes"):
                 img_b64 = base64.b64encode(section["_img_bytes"]).decode()
                 parts.append(
                     f'<div style="text-align:center;margin:16px 0">'
@@ -5734,24 +5799,24 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
                 return col_idx
         return None
 
-    def _chart_png_from_table(self, table: dict, section_title: str = "",
-                                chart_type: str = "auto") -> Optional[bytes]:
-        """Render a chart PNG from a numeric table column.
+    # IBM Carbon categorical palette — 9 distinct colors (used by native OOXML + SVG)
+    _CHART_PALETTE = ["0F62FE", "8A3FFC", "007D79", "FA4D56", "FF832B",
+                      "24A148", "4589FF", "D02670", "161616"]
 
-        chart_type:
-          "auto"  — pick pie for ≤6 rows with % or shares, bar otherwise (default)
-          "bar"   — force bar
-          "pie"   — force pie
-          "line"  — force line (for time series)
+    def _chart_spec_from_table(self, table: dict, section_title: str = "",
+                                chart_type: str = "auto") -> Optional[dict]:
+        """Extract a chart specification (labels, values, type, title) from a
+        numeric-column table. Returns None if the table isn't chartable.
 
-        Returns PNG bytes or None if chart not applicable.
+        NO matplotlib, NO external libraries — pure-Python dict. The caller
+        decides whether to render as OOXML (native Office chart) or inline
+        SVG (for HTML preview).
+
+        Returned shape:
+            {"type": "bar"|"pie"|"line",
+             "title": str, "labels": [str], "values": [float],
+             "x_label": str, "y_label": str, "series_name": str}
         """
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-        except ImportError:
-            return None
         numeric_col_idx = self._table_has_numeric_column(table)
         if numeric_col_idx is None:
             return None
@@ -5759,10 +5824,13 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         rows = table.get("rows") or []
         labels, values = [], []
         for row in rows[:20]:
-            if len(row) <= numeric_col_idx: continue
+            if len(row) <= numeric_col_idx:
+                continue
             label = str(row[0])[:22]
             try:
-                s = str(row[numeric_col_idx]).strip().replace(",", "").replace("$", "").replace("%", "").replace("₹", "").replace("€", "")
+                s = (str(row[numeric_col_idx]).strip()
+                     .replace(",", "").replace("$", "")
+                     .replace("%", "").replace("₹", "").replace("€", ""))
                 values.append(float(s))
                 labels.append(label)
             except (ValueError, TypeError):
@@ -5773,85 +5841,360 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
         # Auto-route chart type
         if chart_type == "auto":
             col_header = (headers[numeric_col_idx] if numeric_col_idx < len(headers) else "").lower()
-            is_share = any(k in col_header for k in ("share","%","percent","proportion","ratio","distribution","mix","split"))
+            is_share = any(k in col_header for k in
+                           ("share", "%", "percent", "proportion", "ratio",
+                            "distribution", "mix", "split"))
             total = sum(abs(v) for v in values)
-            is_time = any(k in (headers[0] if headers else "").lower() for k in ("year","month","quarter","q1","q2","q3","q4","date","period","fy"))
+            x_header = (headers[0] if headers else "").lower()
+            is_time = any(k in x_header for k in
+                          ("year", "month", "quarter", "q1", "q2", "q3", "q4",
+                           "date", "period", "fy"))
             if is_time:
                 chart_type = "line"
-            elif (is_share or (len(values) <= 6 and total > 0 and all(v >= 0 for v in values))):
+            elif is_share or (len(values) <= 6 and total > 0 and all(v >= 0 for v in values)):
                 chart_type = "pie"
             else:
                 chart_type = "bar"
 
-        # IBM Carbon categorical palette — 9 distinct colors
-        PALETTE = ["#0F62FE", "#8A3FFC", "#007D79", "#FA4D56", "#FF832B",
-                   "#24A148", "#4589FF", "#D02670", "#161616"]
+        y_label = headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value"
+        x_label = headers[0] if headers else ""
+        chart_title = (section_title or y_label or "Chart")[:60]
+        return {
+            "type": chart_type,
+            "title": chart_title,
+            "labels": labels,
+            "values": values,
+            "x_label": x_label,
+            "y_label": y_label,
+            "series_name": y_label,
+        }
 
-        try:
-            fig, ax = plt.subplots(figsize=(10, 5.2), dpi=120)
-            chart_title = section_title or (headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Chart")
+    # ──────────────────────────────────────────────────────────────────────
+    # Native OOXML chart (chartN.xml) — bar / pie / line
+    # ──────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _xml_escape(s) -> str:
+        s = str(s)
+        return (s.replace("&", "&amp;").replace("<", "&lt;")
+                 .replace(">", "&gt;").replace('"', "&quot;"))
 
-            if chart_type == "pie":
-                colors = (PALETTE * ((len(values) // len(PALETTE)) + 1))[:len(values)]
-                wedges, texts, autotexts = ax.pie(
-                    values, labels=labels, colors=colors,
-                    autopct='%1.1f%%', startangle=90,
-                    wedgeprops={"edgecolor": "white", "linewidth": 1.5},
-                    textprops={"fontsize": 10, "color": "#161616"},
+    def _ooxml_chart_part_xml(self, spec: dict) -> bytes:
+        """Generate a chartN.xml DrawingML chart part from a spec.
+
+        Returns a complete <c:chartSpace> document. The caller is responsible
+        for writing the bytes to `word/charts/chartN.xml` / `ppt/charts/chartN.xml`
+        / `xl/charts/chartN.xml` and wiring up rels + Content_Types.
+        """
+        ctype = spec.get("type", "bar")
+        labels = [self._xml_escape(l) for l in spec.get("labels", [])]
+        values = list(spec.get("values", []))
+        n = len(values)
+        title = self._xml_escape(spec.get("title", "Chart"))
+        x_label = self._xml_escape(spec.get("x_label", ""))
+        y_label = self._xml_escape(spec.get("y_label", ""))
+        series_name = self._xml_escape(spec.get("series_name", "Series 1"))
+        palette = self._CHART_PALETTE
+
+        # Build <c:cat> (string category axis) — shared by bar / line / pie.
+        cat_pts = "".join(
+            f'<c:pt idx="{i}"><c:v>{labels[i]}</c:v></c:pt>' for i in range(n)
+        )
+        cat_xml = (
+            f'<c:cat><c:strRef><c:f>Sheet1!$A$2:$A${n+1}</c:f>'
+            f'<c:strCache><c:ptCount val="{n}"/>{cat_pts}</c:strCache>'
+            f'</c:strRef></c:cat>'
+        )
+        # Build <c:val> (numeric value axis).
+        val_pts = "".join(
+            f'<c:pt idx="{i}"><c:v>{values[i]}</c:v></c:pt>' for i in range(n)
+        )
+        val_xml = (
+            f'<c:val><c:numRef><c:f>Sheet1!$B$2:$B${n+1}</c:f>'
+            f'<c:numCache><c:formatCode>General</c:formatCode>'
+            f'<c:ptCount val="{n}"/>{val_pts}</c:numCache>'
+            f'</c:numRef></c:val>'
+        )
+
+        title_xml = (
+            '<c:title><c:tx><c:rich>'
+            '<a:bodyPr rot="0" spcFirstLastPara="1" vertOverflow="ellipsis" wrap="square" anchor="ctr" anchorCtr="1"/>'
+            '<a:lstStyle/>'
+            '<a:p><a:pPr><a:defRPr sz="1400" b="1">'
+            '<a:solidFill><a:srgbClr val="161616"/></a:solidFill>'
+            '<a:latin typeface="IBM Plex Sans"/>'
+            '</a:defRPr></a:pPr>'
+            f'<a:r><a:rPr lang="en-US" sz="1400" b="1"><a:latin typeface="IBM Plex Sans"/></a:rPr>'
+            f'<a:t>{title}</a:t></a:r></a:p></c:rich></c:tx>'
+            '<c:overlay val="0"/></c:title>'
+        )
+
+        if ctype == "pie":
+            # dPt colour per slice for IBM Carbon palette.
+            dpts = "".join(
+                f'<c:dPt><c:idx val="{i}"/><c:bubble3D val="0"/>'
+                f'<c:spPr><a:solidFill><a:srgbClr val="{palette[i % len(palette)]}"/>'
+                f'</a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="FFFFFF"/>'
+                f'</a:solidFill></a:ln></c:spPr></c:dPt>'
+                for i in range(n)
+            )
+            ser_xml = (
+                '<c:ser><c:idx val="0"/><c:order val="0"/>'
+                f'<c:tx><c:v>{series_name}</c:v></c:tx>{dpts}'
+                '<c:dLbls><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>'
+                '<c:txPr><a:bodyPr/><a:lstStyle/>'
+                '<a:p><a:pPr><a:defRPr sz="900" b="1">'
+                '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
+                '<a:latin typeface="IBM Plex Sans"/></a:defRPr></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr>'
+                '<c:showLegendKey val="0"/><c:showVal val="0"/>'
+                '<c:showCatName val="0"/><c:showSerName val="0"/>'
+                '<c:showPercent val="1"/><c:showBubbleSize val="0"/></c:dLbls>'
+                f'{cat_xml}{val_xml}</c:ser>'
+            )
+            plot_xml = (
+                '<c:plotArea><c:layout/>'
+                f'<c:pieChart><c:varyColors val="1"/>{ser_xml}'
+                '<c:firstSliceAng val="0"/></c:pieChart></c:plotArea>'
+            )
+        elif ctype == "line":
+            ser_xml = (
+                '<c:ser><c:idx val="0"/><c:order val="0"/>'
+                f'<c:tx><c:v>{series_name}</c:v></c:tx>'
+                f'<c:spPr><a:ln w="28575" cap="rnd"><a:solidFill>'
+                f'<a:srgbClr val="{palette[0]}"/></a:solidFill><a:round/></a:ln>'
+                '</c:spPr>'
+                '<c:marker><c:symbol val="circle"/><c:size val="7"/>'
+                f'<c:spPr><a:solidFill><a:srgbClr val="{palette[0]}"/></a:solidFill>'
+                '<a:ln w="9525"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln>'
+                '</c:spPr></c:marker>'
+                f'{cat_xml}{val_xml}<c:smooth val="0"/></c:ser>'
+            )
+            plot_xml = (
+                '<c:plotArea><c:layout/>'
+                '<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>'
+                f'{ser_xml}'
+                '<c:marker val="1"/><c:axId val="1"/><c:axId val="2"/></c:lineChart>'
+                + self._ooxml_cat_val_axes(x_label, y_label)
+                + '</c:plotArea>'
+            )
+        else:
+            # bar (clustered column)
+            dpts = "".join(
+                f'<c:dPt><c:idx val="{i}"/><c:invertIfNegative val="0"/><c:bubble3D val="0"/>'
+                f'<c:spPr><a:solidFill><a:srgbClr val="{palette[i % len(palette)]}"/>'
+                f'</a:solidFill></c:spPr></c:dPt>'
+                for i in range(n)
+            )
+            ser_xml = (
+                '<c:ser><c:idx val="0"/><c:order val="0"/>'
+                f'<c:tx><c:v>{series_name}</c:v></c:tx>'
+                '<c:invertIfNegative val="0"/>'
+                f'{dpts}{cat_xml}{val_xml}</c:ser>'
+            )
+            plot_xml = (
+                '<c:plotArea><c:layout/>'
+                '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>'
+                '<c:varyColors val="1"/>'
+                f'{ser_xml}'
+                '<c:gapWidth val="80"/><c:axId val="1"/><c:axId val="2"/></c:barChart>'
+                + self._ooxml_cat_val_axes(x_label, y_label)
+                + '</c:plotArea>'
+            )
+
+        chart_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+            'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<c:chart>'
+            + title_xml
+            + '<c:autoTitleDeleted val="0"/>'
+            + plot_xml
+            + '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>'
+            '</c:chart>'
+            '<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr>'
+            '<a:defRPr sz="1000"><a:latin typeface="IBM Plex Sans"/></a:defRPr>'
+            '</a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr>'
+            '</c:chartSpace>'
+        )
+        return chart_xml.encode("utf-8")
+
+    @staticmethod
+    def _ooxml_cat_val_axes(x_label: str, y_label: str) -> str:
+        """Category + Value axis XML shared by bar / line charts."""
+        return (
+            '<c:catAx><c:axId val="1"/>'
+            '<c:scaling><c:orientation val="minMax"/></c:scaling>'
+            '<c:delete val="0"/><c:axPos val="b"/>'
+            f'<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/>'
+            f'<a:p><a:pPr><a:defRPr sz="900"><a:solidFill>'
+            f'<a:srgbClr val="525252"/></a:solidFill>'
+            f'<a:latin typeface="IBM Plex Sans"/></a:defRPr></a:pPr>'
+            f'<a:r><a:rPr lang="en-US" sz="900"/><a:t>{x_label}</a:t></a:r>'
+            f'</a:p></c:rich></c:tx><c:overlay val="0"/></c:title>'
+            '<c:crossAx val="2"/><c:crosses val="autoZero"/>'
+            '<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/>'
+            '<c:noMultiLvlLbl val="0"/></c:catAx>'
+            '<c:valAx><c:axId val="2"/>'
+            '<c:scaling><c:orientation val="minMax"/></c:scaling>'
+            '<c:delete val="0"/><c:axPos val="l"/>'
+            '<c:majorGridlines><c:spPr><a:ln w="3175">'
+            '<a:solidFill><a:srgbClr val="E0E0E0"/></a:solidFill>'
+            '<a:prstDash val="dash"/></a:ln></c:spPr></c:majorGridlines>'
+            f'<c:title><c:tx><c:rich><a:bodyPr rot="-5400000"/><a:lstStyle/>'
+            f'<a:p><a:pPr><a:defRPr sz="900"><a:solidFill>'
+            f'<a:srgbClr val="525252"/></a:solidFill>'
+            f'<a:latin typeface="IBM Plex Sans"/></a:defRPr></a:pPr>'
+            f'<a:r><a:rPr lang="en-US" sz="900"/><a:t>{y_label}</a:t></a:r>'
+            f'</a:p></c:rich></c:tx><c:overlay val="0"/></c:title>'
+            '<c:numFmt formatCode="General" sourceLinked="0"/>'
+            '<c:crossAx val="1"/><c:crosses val="autoZero"/>'
+            '<c:crossBetween val="between"/></c:valAx>'
+        )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Pure-Python SVG chart (HTML iframe preview only — no matplotlib)
+    # ──────────────────────────────────────────────────────────────────────
+    def _svg_chart_from_spec(self, spec: dict, width: int = 720, height: int = 360) -> str:
+        """Render an inline SVG chart (bar/pie/line) from a chart spec.
+        Used in the HTML iframe preview. Pure string math, no libraries."""
+        ctype = spec.get("type", "bar")
+        labels = spec.get("labels", []) or []
+        values = spec.get("values", []) or []
+        title = self._xml_escape(spec.get("title", ""))
+        palette = self._CHART_PALETTE
+        if not values:
+            return ""
+        esc = self._xml_escape
+
+        if ctype == "pie":
+            import math
+            cx, cy, r = width // 2, height // 2 + 10, min(width, height) // 2 - 40
+            total = sum(max(0, v) for v in values) or 1.0
+            angle0 = -math.pi / 2
+            slices = []
+            legend = []
+            for i, (lab, v) in enumerate(zip(labels, values)):
+                pct = max(0, v) / total
+                angle1 = angle0 + pct * 2 * math.pi
+                x1, y1 = cx + r * math.cos(angle0), cy + r * math.sin(angle0)
+                x2, y2 = cx + r * math.cos(angle1), cy + r * math.sin(angle1)
+                large = 1 if (angle1 - angle0) > math.pi else 0
+                color = palette[i % len(palette)]
+                slices.append(
+                    f'<path d="M{cx},{cy} L{x1:.1f},{y1:.1f} A{r},{r} 0 {large} 1 {x2:.1f},{y2:.1f} Z" '
+                    f'fill="#{color}" stroke="#FFFFFF" stroke-width="1.5"/>'
                 )
-                for at in autotexts:
-                    at.set_color("white"); at.set_fontsize(9); at.set_fontweight("bold")
-                ax.set_title(str(chart_title)[:60], fontsize=13, color="#161616", pad=18, fontweight="600")
-                ax.axis("equal")
-            elif chart_type == "line":
-                ax.plot(labels, values, color="#0F62FE", linewidth=2.5, marker="o",
-                        markersize=7, markerfacecolor="#0F62FE", markeredgecolor="white")
-                ax.fill_between(range(len(values)), values, alpha=0.15, color="#0F62FE")
-                ax.set_ylabel(headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value",
-                              fontsize=10, color="#525252")
-                ax.set_xlabel(headers[0] if headers else "", fontsize=10, color="#525252")
-                ax.set_title(str(chart_title)[:60], fontsize=13, color="#161616", pad=12, fontweight="600")
-                ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
-                ax.tick_params(axis="x", labelrotation=25, labelsize=9, colors="#525252")
-                ax.tick_params(axis="y", labelsize=9, colors="#525252")
-                ax.grid(axis="y", alpha=0.25, linestyle="--")
-                for i, v in enumerate(values):
-                    ax.text(i, v, f"{v:,.0f}" if v >= 10 else f"{v:,.2f}",
-                            ha="center", va="bottom", fontsize=8, color="#161616")
-            else:  # bar
-                colors = (PALETTE * ((len(values) // len(PALETTE)) + 1))[:len(values)]
-                bars = ax.bar(labels, values, color=colors, edgecolor="#0043CE", width=0.7)
-                ax.set_ylabel(headers[numeric_col_idx] if numeric_col_idx < len(headers) else "Value",
-                              fontsize=10, color="#525252")
-                ax.set_xlabel(headers[0] if headers else "", fontsize=10, color="#525252")
-                ax.set_title(str(chart_title)[:60], fontsize=13, color="#161616", pad=12, fontweight="600")
-                ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
-                ax.tick_params(axis="x", labelrotation=35, labelsize=9, colors="#525252")
-                ax.tick_params(axis="y", labelsize=9, colors="#525252")
-                ax.grid(axis="y", alpha=0.25, linestyle="--")
-                for bar, v in zip(bars, values):
-                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                            f"{v:,.0f}" if v >= 10 else f"{v:,.2f}",
-                            ha="center", va="bottom", fontsize=8, color="#161616")
+                # Label
+                mid = (angle0 + angle1) / 2
+                tx, ty = cx + (r * 0.62) * math.cos(mid), cy + (r * 0.62) * math.sin(mid)
+                slices.append(
+                    f'<text x="{tx:.0f}" y="{ty:.0f}" fill="#FFFFFF" font-size="11" '
+                    f'font-weight="700" text-anchor="middle" dy="4" '
+                    f'font-family="IBM Plex Sans, Arial">{pct*100:.1f}%</text>'
+                )
+                legend.append((lab, color))
+                angle0 = angle1
+            legend_xml = ""
+            ly = 40
+            for lab, color in legend[:8]:
+                legend_xml += (
+                    f'<rect x="{width-170}" y="{ly-10}" width="12" height="12" fill="#{color}"/>'
+                    f'<text x="{width-150}" y="{ly}" font-size="11" fill="#161616" '
+                    f'font-family="IBM Plex Sans, Arial">{esc(lab)[:22]}</text>'
+                )
+                ly += 20
+            body = "".join(slices) + legend_xml
+        elif ctype == "line":
+            # Area+line
+            pad_l, pad_r, pad_t, pad_b = 60, 30, 50, 50
+            w, h = width - pad_l - pad_r, height - pad_t - pad_b
+            vmax = max(values) or 1
+            vmin = min(min(values), 0)
+            rng = (vmax - vmin) or 1
+            def xpt(i): return pad_l + (i / max(1, len(values) - 1)) * w
+            def ypt(v): return pad_t + h - ((v - vmin) / rng) * h
+            pts = " ".join(f"{xpt(i):.1f},{ypt(v):.1f}" for i, v in enumerate(values))
+            area_pts = f"{pad_l},{pad_t + h} " + pts + f" {pad_l + w},{pad_t + h}"
+            axis_y = []
+            for i in range(5):
+                gy = pad_t + h - (i / 4) * h
+                gv = vmin + (i / 4) * rng
+                axis_y.append(
+                    f'<line x1="{pad_l}" y1="{gy:.0f}" x2="{pad_l + w}" y2="{gy:.0f}" '
+                    f'stroke="#E0E0E0" stroke-dasharray="3,3"/>'
+                    f'<text x="{pad_l - 8}" y="{gy + 4:.0f}" text-anchor="end" '
+                    f'font-size="10" fill="#525252" font-family="IBM Plex Sans, Arial">{gv:.0f}</text>'
+                )
+            x_labels = []
+            step = max(1, len(labels) // 8)
+            for i, lab in enumerate(labels):
+                if i % step != 0 and i != len(labels) - 1: continue
+                x_labels.append(
+                    f'<text x="{xpt(i):.0f}" y="{pad_t + h + 18:.0f}" text-anchor="middle" '
+                    f'font-size="10" fill="#525252" font-family="IBM Plex Sans, Arial">{esc(lab)[:12]}</text>'
+                )
+            markers = "".join(
+                f'<circle cx="{xpt(i):.1f}" cy="{ypt(v):.1f}" r="4" fill="#{palette[0]}" stroke="#FFFFFF" stroke-width="2"/>'
+                for i, v in enumerate(values)
+            )
+            body = (
+                "".join(axis_y)
+                + f'<polygon points="{area_pts}" fill="#{palette[0]}" fill-opacity="0.15"/>'
+                + f'<polyline points="{pts}" fill="none" stroke="#{palette[0]}" stroke-width="2.5"/>'
+                + markers
+                + "".join(x_labels)
+            )
+        else:
+            # Bar
+            pad_l, pad_r, pad_t, pad_b = 60, 30, 50, 60
+            w, h = width - pad_l - pad_r, height - pad_t - pad_b
+            vmax = max(values) or 1
+            vmin = min(min(values), 0)
+            rng = (vmax - vmin) or 1
+            bar_w = w / max(1, len(values)) * 0.75
+            gap = (w / max(1, len(values))) - bar_w
+            bars = []
+            axis_y = []
+            for i in range(5):
+                gy = pad_t + h - (i / 4) * h
+                gv = vmin + (i / 4) * rng
+                axis_y.append(
+                    f'<line x1="{pad_l}" y1="{gy:.0f}" x2="{pad_l + w}" y2="{gy:.0f}" '
+                    f'stroke="#E0E0E0" stroke-dasharray="3,3"/>'
+                    f'<text x="{pad_l - 8}" y="{gy + 4:.0f}" text-anchor="end" '
+                    f'font-size="10" fill="#525252" font-family="IBM Plex Sans, Arial">{gv:.0f}</text>'
+                )
+            for i, (lab, v) in enumerate(zip(labels, values)):
+                bx = pad_l + gap / 2 + i * (bar_w + gap)
+                bh = ((v - vmin) / rng) * h
+                by = pad_t + h - bh
+                color = palette[i % len(palette)]
+                bars.append(
+                    f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" fill="#{color}"/>'
+                    f'<text x="{bx + bar_w/2:.1f}" y="{by - 4:.0f}" text-anchor="middle" '
+                    f'font-size="10" fill="#161616" font-family="IBM Plex Sans, Arial">{v:,.0f}</text>'
+                    f'<text x="{bx + bar_w/2:.1f}" y="{pad_t + h + 18:.0f}" text-anchor="middle" '
+                    f'font-size="10" fill="#525252" font-family="IBM Plex Sans, Arial">{esc(lab)[:12]}</text>'
+                )
+            body = "".join(axis_y) + "".join(bars)
 
-            plt.tight_layout()
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-            plt.close(fig)
-            return buf.getvalue()
-        except Exception as e:
-            print(f"[DocGen] chart render failed: {e}")
-            try: plt.close('all')
-            except Exception: pass
-            return None
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+            f'width="100%" style="max-width:{width}px;background:#FFFFFF;">'
+            f'<text x="{width//2}" y="24" text-anchor="middle" font-size="14" '
+            f'font-weight="700" fill="#161616" font-family="IBM Plex Sans, Arial">{title}</text>'
+            f'{body}</svg>'
+        )
 
     def _autoinject_charts(self, sections: list) -> list:
-        """For any section with a numeric table AND no existing image, render a
-        chart PNG and attach as the section's image.
+        """For any section with a numeric table AND no existing image, attach a
+        `_chart_spec` dict. Downstream builders (DOCX / PPTX / XLSX) emit the
+        chart as a NATIVE OOXML chart part (not a PNG). HTML preview renders
+        the same spec as inline SVG.
 
-        Respects a per-section chart_type field: "bar" | "pie" | "line" | "auto".
-        If the section has "chart_data" (alternative to table for pure chart intent),
-        use that directly; otherwise derive from the table.
+        Respects a per-section chart_type field: 'bar' | 'pie' | 'line' | 'auto'.
+        If the section has 'chart_data' (alternative to table for pure chart
+        intent), use that directly; otherwise derive from the table.
         """
         out = []
         for s in sections:
@@ -5860,13 +6203,12 @@ if(e.key==="ArrowLeft")nav(-1);if(e.key==="ArrowRight")nav(1)}});
             ns = dict(s)
             tbl = ns.get("table") or ns.get("chart_data")
             chart_type = ns.get("chart_type", "auto")
-            if (tbl and not ns.get("_img_bytes") and not ns.get("image_id") and not ns.get("svg")):
-                png = self._chart_png_from_table(tbl, ns.get("title",""), chart_type=chart_type)
-                if png:
-                    ns["_img_bytes"] = png
-                    ns["_img_width"] = 1200
-                    ns["_img_height"] = 600
-                    ns["_img_source"] = f"generated:chart:{chart_type}"
+            if (tbl and not ns.get("_img_bytes") and not ns.get("image_id")
+                    and not ns.get("svg") and not ns.get("_chart_spec")):
+                spec = self._chart_spec_from_table(tbl, ns.get("title", ""), chart_type=chart_type)
+                if spec:
+                    ns["_chart_spec"] = spec
+                    ns["_img_source"] = f"generated:ooxml-chart:{spec['type']}"
                     ns["image_caption"] = ns.get("image_caption") or f"Chart — {ns.get('title','data')}"
             out.append(ns)
         return out
@@ -6180,7 +6522,41 @@ function showTab(i){{
         # Build slides
         slides_xml = []
         slide_rels = []
-        media_files = []  # (filename, bytes)
+        media_files = []    # (filename, bytes)
+        chart_parts = []    # (part_name, xml_bytes) — ppt/charts/chartN.xml
+        chart_overrides = []  # Content_Types <Override> rows for charts
+
+        def chart_graphic_frame(spec, slide_rel_entries, x_emu, y_emu, w_emu, h_emu, shape_id):
+            """Emit a <p:graphicFrame> referencing a NATIVE OOXML chart part.
+            Also writes the chart XML part and registers Content_Types + rels.
+            Returns the graphicFrame XML string.
+            """
+            chart_idx = len(chart_parts) + 1
+            chart_xml_bytes = self._ooxml_chart_part_xml(spec)
+            chart_parts.append((f"ppt/charts/chart{chart_idx}.xml", chart_xml_bytes))
+            chart_overrides.append(
+                f'<Override PartName="/ppt/charts/chart{chart_idx}.xml" '
+                f'ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+            )
+            rid = f"rId{len(slide_rel_entries) + 2}"
+            slide_rel_entries.append(
+                f'<Relationship Id="{rid}" '
+                f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" '
+                f'Target="../charts/chart{chart_idx}.xml"/>'
+            )
+            return (
+                '<p:graphicFrame>'
+                f'<p:nvGraphicFramePr><p:cNvPr id="{shape_id}" name="Chart {chart_idx}"/>'
+                '<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>'
+                f'<p:xfrm><a:off x="{x_emu}" y="{y_emu}"/>'
+                f'<a:ext cx="{w_emu}" cy="{h_emu}"/></p:xfrm>'
+                '<a:graphic>'
+                '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+                f'<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+                f'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+                f'r:id="{rid}"/>'
+                '</a:graphicData></a:graphic></p:graphicFrame>'
+            )
 
         # ── IBM logo footer (added to every slide) ──
         logo_png = self._get_ibm_logo_png()
@@ -6248,7 +6624,8 @@ function showTab(i){{
                         size=2600, bold=True, color="161616")
             )
 
-            has_image = bool(section.get("_img_bytes"))
+            has_chart = bool(section.get("_chart_spec"))
+            has_image = bool(section.get("_img_bytes")) or has_chart
 
             # Paragraphs + bullets (text zone)
             text_x = 457200
@@ -6280,8 +6657,24 @@ function showTab(i){{
                     f'<p:txBody><a:bodyPr wrap="square" anchor="t"/><a:lstStyle/>{body}</p:txBody></p:sp>'
                 )
 
-            # Image on the right
-            if has_image:
+            # Chart (native OOXML) or image on the right
+            if has_chart:
+                # Native OOXML chart: 5.1" x 3.8" on right half of slide
+                ch_x = 6629400
+                ch_y = 1143000
+                ch_w = 5105400
+                ch_h = 3500000
+                shapes.append(chart_graphic_frame(
+                    section["_chart_spec"], slide_rel_entries,
+                    ch_x, ch_y, ch_w, ch_h, shape_id=idx * 100 + 5,
+                ))
+                if section.get("image_caption"):
+                    shapes.append(
+                        txt_box(ch_x, ch_y + ch_h + 50000, ch_w, 400000,
+                                f"Chart — {section['image_caption']}",
+                                size=900, color="525252")
+                    )
+            elif section.get("_img_bytes"):
                 media_idx = len(media_files)
                 fname = f"image{media_idx+1}.png"
                 media_files.append((fname, section["_img_bytes"]))
@@ -6377,7 +6770,8 @@ function showTab(i){{
                 '<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>'
                 '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
                 f'{overrides}'
-                '</Types>'
+                + "".join(chart_overrides)
+                + '</Types>'
             )
             zf.writestr("[Content_Types].xml", ct_xml)
 
@@ -6547,6 +6941,10 @@ function showTab(i){{
             for fname, fbytes in media_files:
                 zf.writestr(f"ppt/media/{fname}", fbytes)
 
+            # Native OOXML chart parts
+            for part_name, xml_bytes in chart_parts:
+                zf.writestr(part_name, xml_bytes)
+
         pptx_bytes = pptx_buf.getvalue()
         pptx_b64 = base64.b64encode(pptx_bytes).decode()
         data_uri = f"data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,{pptx_b64}"
@@ -6569,7 +6967,8 @@ function showTab(i){{
 
         # Content slides
         for idx, section in enumerate(sections, start=1):
-            has_img = bool(section.get("_img_bytes"))
+            has_chart = bool(section.get("_chart_spec"))
+            has_img = bool(section.get("_img_bytes")) or has_chart
             text_col_w = "50%" if has_img else "100%"
 
             text_html = f'<h2 style="font-size:26px;color:{IBM_GRAY_100};font-weight:700;margin:0 0 16px">{self._html_esc(section.get("title", ""))}</h2>'
@@ -6584,7 +6983,19 @@ function showTab(i){{
                 text_html += f'<ul style="padding-left:20px;margin:8px 0">{lis}</ul>'
 
             img_html = ""
-            if has_img:
+            if has_chart:
+                svg = self._svg_chart_from_spec(section["_chart_spec"], width=520, height=300)
+                img_html = (
+                    f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
+                    f'{svg}'
+                    + (
+                        f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
+                        f'Chart — {self._html_esc(section.get("image_caption") or "")}</div>'
+                        if section.get("image_caption") else ""
+                    )
+                    + '</div>'
+                )
+            elif section.get("_img_bytes"):
                 img_b64 = base64.b64encode(section["_img_bytes"]).decode()
                 img_html = (
                     f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
