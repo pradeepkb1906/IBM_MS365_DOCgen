@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-20 14:45 IST (3-tier KB image fallback: Office extraction -> PDF snapshots -> Wikipedia; compression 5-75x; source attribution)"""
+"""# Last synced to OWUI DB: 2026-04-20 14:42 IST (figure-only filter: rejects logos/icons/banners/headers, prefers architecture/devops/infra/component/sequence diagrams)"""
 import re
 import json
 import base64
@@ -3060,14 +3060,55 @@ class Tools:
             except Exception as e:
                 print(f"[DocGen] office extract {fname} failed: {e}")
         return out
+    _DIAGRAM_HINTS = ("architecture", "infrastructure", "topology", "pipeline",
+                      "devops", "ci/cd", "cicd", "component", "sequence",
+                      "flow", "flowchart", "blueprint", "deployment", "network",
+                      "system", "stack", "data flow", "schematic", "workflow",
+                      "swim", "swimlane", "lane", "state", "entity", "class",
+                      "context", "module", "microservice", "kubernetes", "k8s",
+                      "containers", "nodes", "api", "service mesh", "lambda",
+                      "diagram", "topology", "reference")
+    _REJECT_HINTS = ("logo", "brand", "wordmark", "icon", "favicon", "avatar",
+                     "badge", "seal", "emblem", "header", "footer", "banner",
+                     "divider", "watermark", "title_slide", "splash", "cover",
+                     "headshot", "photo", "people", "team")
+    def _is_likely_non_figure(self, cand):
+        """Cheap pre-filter: drop candidates that aren't technical figures
+        before paying for a Claude Vision call."""
+        fn = (cand.get("id", "") + " " + cand.get("source_file", "")).lower()
+        if any(h in fn for h in self._REJECT_HINTS): return True
+        b = cand.get("bytes") or b""
+        # Very small images are almost always logos/icons/favicons
+        if len(b) < 8000: return True
+        try:
+            from io import BytesIO
+            im = Image.open(BytesIO(b))
+            w, h = im.size
+            # Square-ish + small = logo (under 400px square = logo territory)
+            if max(w, h) < 400 and 0.8 <= (w / max(h, 1)) <= 1.25:
+                return True
+            # Extremely narrow banners / dividers
+            if max(w, h) / max(min(w, h), 1) > 8: return True
+            # Tiny images regardless of aspect
+            if w * h < 60000: return True  # below ~245×245 = too small for a figure
+        except Exception: pass
+        return False
     def _bm25_prefilter(self, section, candidates, top_n):
-        if not candidates or len(candidates) <= top_n: return list(candidates)
+        """Rank candidates by token overlap + diagram-term boost, drop non-figures."""
+        cands = [c for c in (candidates or []) if not self._is_likely_non_figure(c)]
+        if not cands: return []
+        if len(cands) <= top_n: return cands
         tok = lambda s: set(re.findall(r"\w{3,}", (s or "").lower()))
         q = tok((section.get("title", "") + " " +
                  " ".join(section.get("bullets", []) or []) + " " +
                  " ".join(section.get("paragraphs", []) or [])))
-        scored = sorted(((len(q & tok(c.get("caption_seed", ""))), c) for c in candidates),
-                        key=lambda x: x[0], reverse=True)
+        def score(c):
+            ctx = (c.get("caption_seed", "") or "").lower()
+            overlap = len(q & tok(ctx))
+            # Boost +3 when the candidate's context mentions a diagram term
+            diag = sum(1 for h in self._DIAGRAM_HINTS if h in ctx)
+            return overlap + 3 * diag
+        scored = sorted(((score(c), c) for c in cands), key=lambda x: x[0], reverse=True)
         return [c for _, c in scored[:top_n]]
     def _claude_api_chat(self, messages, auth, timeout=90):
         """Single-shot Claude call via OWUI's /api/chat/completions. Returns str content or None."""
@@ -3132,13 +3173,24 @@ class Tools:
         title = section.get("title", "")
         bullets = " | ".join((section.get("bullets", []) or [])[:5])
         prompt = (f'Section title: "{title}"\nKey points: {bullets}\n\n'
-                  f"You see {len(image_parts)} candidate images from the user's knowledge base. "
-                  "Pick the ONE that best ILLUSTRATES this section (not one that just repeats the text).\n"
-                  "Scoring scale (be generous — real KB images usually land in the 80-92 band):\n"
-                  '  85-100 = topically related and useful to show alongside the section\n'
-                  '  60-84  = loosely related, same domain but weak fit\n'
-                  '  <60    = irrelevant / decorative / wrong topic\n'
-                  'If any candidate shows the same subject matter as the section title, score it 85+.\n'
+                  f"You see {len(image_parts)} candidate images from the user's knowledge base.\n\n"
+                  "ONLY pick images that are TECHNICAL FIGURES:\n"
+                  "  ✓ architecture diagrams, solution blueprints, reference architectures\n"
+                  "  ✓ infrastructure topology, network diagrams, deployment diagrams\n"
+                  "  ✓ devops / CI-CD pipelines, workflow diagrams\n"
+                  "  ✓ component diagrams, module diagrams, system context diagrams\n"
+                  "  ✓ sequence diagrams, data-flow diagrams, flowcharts, state machines\n"
+                  "  ✓ schematics, wiring diagrams, swim-lane diagrams\n\n"
+                  "NEVER pick (give score 0-25):\n"
+                  "  ✗ LOGOS of any kind — IBM, partner, product, brand marks, wordmarks\n"
+                  "  ✗ icons, badges, seals, headshots, photos of people\n"
+                  "  ✗ marketing splash pages, stock photography, decorative banners\n"
+                  "  ✗ page headers / footers / dividers / watermarks\n"
+                  "  ✗ plain title slides or text-only images\n\n"
+                  "Scoring:\n"
+                  "  85-100 = technical figure that clearly illustrates the section topic\n"
+                  "  60-84  = technical figure of the same domain but weaker fit\n"
+                  "  <50    = not a technical figure (logos, photos, etc.) — REJECT\n\n"
                   'Return ONLY JSON: {"best_idx":<int>,"score":<0-100>,"caption":"<=15 words"}')
         content = [{"type": "text", "text": prompt}]
         for idx, b64, _c in image_parts:
