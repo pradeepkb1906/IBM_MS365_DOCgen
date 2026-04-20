@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-20 18:09 IST (per-request cache reset: new attachment set -> wipes _IMAGE_STORE + _EXTRACT_CACHE so no prior-document images bleed through)"""
+"""# Last synced to OWUI DB: 2026-04-20 20:13 IST (per-chat cache isolation ChatGPT/Claude-style: images tagged with session_id, wipe only the affected chat)"""
 import re
 import json
 import base64
@@ -6,6 +6,8 @@ import uuid
 import io
 import time
 import threading
+from contextvars import ContextVar
+_current_session: ContextVar = ContextVar("_ibm_docgen_current_session", default="default")
 import traceback
 import zipfile
 import asyncio
@@ -283,7 +285,62 @@ class _ImageStore:
                 self._store.clear()
             else:
                 self._store = {k: v for k, v in self._store.items() if v.get("pinned")}
+    def reset_for_session(self, session_id: str) -> int:
+        """Delete every image tagged to this chat session. Returns count removed."""
+        if not session_id: return 0
+        with self._lock:
+            to_del = [k for k, v in self._store.items()
+                      if v.get("metadata", {}).get("session_id") == session_id]
+            for k in to_del: del self._store[k]
+            return len(to_del)
+    def reset_not_in_sessions(self, active_sessions) -> int:
+        """Evict images whose session_id is NOT in the active set.
+        Used when a fresh session appears to GC long-gone sessions."""
+        keep = set(active_sessions or [])
+        with self._lock:
+            to_del = [k for k, v in self._store.items()
+                      if v.get("metadata", {}).get("session_id") not in keep]
+            for k in to_del: del self._store[k]
+            return len(to_del)
 _IMAGE_STORE = _ImageStore()
+class _SessionCache:
+    """Tracks, per OWUI chat_id, which attachment set was last processed.
+    Detects transitions so _IMAGE_STORE can be wiped at the right
+    granularity (per-session, not globally)."""
+    TTL_SECONDS = 4 * 3600
+    def __init__(self):
+        self._sessions: dict = {}
+        self._lock = threading.Lock()
+    def classify(self, session_id: str, file_ids) -> str:
+        """Returns one of:
+          'none'            — user attached no files on this call
+          'same'            — same attachment set as last call (KEEP cache)
+          'new_attachments' — same session, different files (WIPE this session)
+          'new_session'     — first time seeing this chat_id (start fresh)
+        Side-effect: updates the session's last-seen file set + timestamp,
+        evicts sessions idle past TTL_SECONDS.
+        """
+        key = tuple(sorted(file_ids or []))
+        if not key: return "none"
+        with self._lock:
+            now = time.time()
+            stale = [sid for sid, v in self._sessions.items()
+                     if now - v["touched"] > self.TTL_SECONDS]
+            for sid in stale: del self._sessions[sid]
+            rec = self._sessions.get(session_id)
+            if rec is None:
+                self._sessions[session_id] = {"file_ids": key, "touched": now}
+                return "new_session"
+            if rec["file_ids"] == key:
+                rec["touched"] = now
+                return "same"
+            rec["file_ids"] = key
+            rec["touched"] = now
+            return "new_attachments"
+    def active_sessions(self) -> set:
+        with self._lock:
+            return set(self._sessions.keys())
+_SESSION_CACHE = _SessionCache()
 class _ExtractionCache:
     TTL_SECONDS = 3600
     MAX_ENTRIES = 64
@@ -1043,6 +1100,8 @@ class Tools:
         __request__=None,
         __files__=None,
         __event_emitter__=None,
+        __metadata__=None,
+        __chat_id__=None,
     ) -> str:
         """Source mode: Chat Attachments."""
         try:
@@ -1058,9 +1117,14 @@ class Tools:
                     "error": "No attachment_file_ids provided and no files attached to chat.",
                     "text_chunks": [], "images": []
                 })
-            if self._reset_caches_if_new_attachments(attachment_file_ids, __event_emitter__):
+            chat_id = self._resolve_chat_id(__metadata__, __chat_id__, None, __user__)
+            verdict = self._cache_policy_for_attachments(chat_id, attachment_file_ids)
+            if verdict == "new_session":
                 await self._emit(__event_emitter__,
-                    "♻️ New attachment set — cleared old image cache")
+                    f"🆕 New chat session — starting with fresh image cache for chat:{chat_id[:10]}…")
+            elif verdict == "new_attachments":
+                await self._emit(__event_emitter__,
+                    f"♻️ New attachment in this chat — wiped prior images, loading new")
             await self._emit(__event_emitter__, f"📎 Processing {len(attachment_file_ids)} attachment(s)...")
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_attachments'), initial_phase='📎 Extracting from attachments')
             auth = self._auth_from_request(__request__)
@@ -1395,6 +1459,8 @@ class Tools:
         __request__=None,
         __files__=None,
         __event_emitter__=None,
+        __metadata__=None,
+        __chat_id__=None,
     ) -> str:
         """One-call "do the right thing" mode. Tool figures out where to pull from:"""
         try:
@@ -1422,9 +1488,14 @@ class Tools:
                 all_images.extend(self._extract_from_collection(tc, cf, auth))
                 source_log.append(f"knowledge:{knowledge_collection_id}")
             if attachment_file_ids:
-                if self._reset_caches_if_new_attachments(attachment_file_ids, __event_emitter__):
+                chat_id = self._resolve_chat_id(__metadata__, __chat_id__, None, __user__)
+                verdict = self._cache_policy_for_attachments(chat_id, attachment_file_ids)
+                if verdict == "new_session":
                     await self._emit(__event_emitter__,
-                        "♻️ New attachment set — cleared old image cache")
+                        f"🆕 New chat session — fresh image cache for chat:{chat_id[:10]}…")
+                elif verdict == "new_attachments":
+                    await self._emit(__event_emitter__,
+                        f"♻️ New attachment in this chat — wiped prior images, loading new")
                 await self._emit(__event_emitter__, f"📎 {len(attachment_file_ids)} attachment(s)...")
                 tc, ti = await asyncio.to_thread(
                     self._extract_attachments_parallel, attachment_file_ids, auth, 4
@@ -1526,6 +1597,8 @@ class Tools:
         __event_emitter__=None,
         __files__=None,
         __request__=None,
+        __metadata__=None,
+        __chat_id__=None,
     ):
         """Build and render the final DOCX, PPTX or XLSX inline in chat."""
         try:
@@ -1599,8 +1672,11 @@ class Tools:
                         if fid: auto_ids.append(fid)
                 if auto_ids:
                     auth = self._auth_from_request(__request__)
+                    chat_id = self._resolve_chat_id(
+                        locals().get("__metadata__"), locals().get("__chat_id__"),
+                        session_id, __user__)
                     resolved_sections = await self._kb_enrich_sections(
-                        resolved_sections, auto_ids, auth, __event_emitter__)
+                        resolved_sections, auto_ids, auth, __event_emitter__, chat_id=chat_id)
             if format == "docx":
                 html_response = self._build_and_render_docx(
                     session_id, title, client_name, resolved_sections, __event_emitter__
@@ -2421,6 +2497,7 @@ class Tools:
                     "page": i + 1,
                     "kind": "page_render",
                     "caption": f"{src.get('source','')} — page {i+1}",
+                    "session_id": _current_session.get(),
                 }
                 _IMAGE_STORE.put(img_id, png, meta)
                 return {"id": img_id, "png_bytes": png, "metadata": meta}
@@ -2743,6 +2820,7 @@ class Tools:
             "source_format": src.get("ext", ""),
             "width": pil.width, "height": pil.height,
             "byte_size": len(png_bytes),
+            "session_id": _current_session.get(),
         }
         _IMAGE_STORE.put(img_id, png_bytes, metadata)
         return metadata
@@ -3003,19 +3081,43 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] kb image compress failed, using raw: {e}")
             return raw_bytes, "png"
-    def _reset_caches_if_new_attachments(self, file_ids, event_emitter=None):
-        """Detect a new attachment set vs the last call and wipe old images +
-        extraction cache so nothing from a prior document bleeds into this one.
-        Returns True when a reset actually happened."""
-        key = tuple(sorted((file_ids or [])))
-        last = getattr(self, "_last_attachment_key", None)
-        if key and key != last:
-            _IMAGE_STORE.reset(purge_pinned=True)
-            _EXTRACT_CACHE.reset()
-            self._last_attachment_key = key
-            print(f"[DocGen] cache reset: new attachment set {list(key)[:3]}...")
-            return True
-        return False
+    def _resolve_chat_id(self, __metadata__=None, __chat_id__=None,
+                          session_id=None, __user__=None) -> str:
+        """Per-chat-session identity. Priority:
+          1. OWUI __metadata__['chat_id'] / ['session_id']  (OWUI 0.6+)
+          2. __chat_id__ kwarg
+          3. session_id explicit arg
+          4. user-scoped fallback
+          5. 'default'
+        """
+        if isinstance(__metadata__, dict):
+            cid = __metadata__.get("chat_id") or __metadata__.get("session_id")
+            if cid: return str(cid)
+        if __chat_id__: return str(__chat_id__)
+        if session_id: return str(session_id)
+        if isinstance(__user__, dict) and __user__.get("id"):
+            return f"user:{__user__['id']}"
+        return "default"
+    def _cache_policy_for_attachments(self, session_id: str, file_ids) -> str:
+        """Apply the ChatGPT/Claude-style per-chat cache policy:
+          'none'             - no files attached (no change)
+          'same'             - same files as last call  -> KEEP cache
+          'new_attachments'  - same chat, different files -> WIPE this chat's
+                                 images only, other chats unaffected
+          'new_session'      - first time this chat_id seen -> start fresh +
+                                 GC sessions that fell past TTL
+        Sets the contextvar so every _store_image during this request tags
+        its metadata with the correct session_id.
+        """
+        _current_session.set(session_id or "default")
+        verdict = _SESSION_CACHE.classify(session_id, file_ids)
+        if verdict == "new_session":
+            gone = _IMAGE_STORE.reset_not_in_sessions(_SESSION_CACHE.active_sessions())
+            if gone: print(f"[DocGen] cache: new chat session {session_id}, evicted {gone} stale images")
+        elif verdict == "new_attachments":
+            gone = _IMAGE_STORE.reset_for_session(session_id)
+            print(f"[DocGen] cache: new attachments in chat {session_id}, wiped {gone} old images")
+        return verdict
     def _fetch_attachment_bytes(self, file_ids, auth):
         """Beta-safe attachment loader. Reuses _fetch_file_metadata / _fetch_file_bytes
         which already try local OWUI data/uploads/ on disk (dynamically located via
@@ -3245,13 +3347,19 @@ class Tools:
                 "score": float(parsed.get("score", 0) or 0),
                 "caption": str(parsed.get("caption", "")).strip()[:200],
                 "type": "image"}
-    async def _kb_enrich_sections(self, sections, file_ids, auth, __event_emitter__=None):
-        """Enrich each section with a KB match (Plan B first, Plan C fallback). 95 threshold."""
+    async def _kb_enrich_sections(self, sections, file_ids, auth, __event_emitter__=None, chat_id=None):
+        """Enrich each section with a KB match (Plan B first, Plan C fallback). 95 threshold.
+        chat_id = OWUI session identity for per-chat cache isolation."""
         if not file_ids or not self.valves.enable_kb_vision_layout or not sections:
             return sections
-        if self._reset_caches_if_new_attachments(file_ids, __event_emitter__):
+        verdict = self._cache_policy_for_attachments(chat_id or "default", file_ids)
+        if verdict == "new_session":
             try: await self._emit(__event_emitter__,
-                "♻️ Fresh attachment set — cleared KB image cache so no prior-document images bleed through")
+                f"🆕 New chat — starting with fresh image cache (chat:{(chat_id or 'default')[:10]}…)")
+            except Exception: pass
+        elif verdict == "new_attachments":
+            try: await self._emit(__event_emitter__,
+                f"♻️ New attachment in this chat — wiped prior images, loading new")
             except Exception: pass
         try: await self._emit(__event_emitter__, f"📎 Indexing {len(file_ids)} attachment(s) for 50/50 layout...")
         except Exception: pass
