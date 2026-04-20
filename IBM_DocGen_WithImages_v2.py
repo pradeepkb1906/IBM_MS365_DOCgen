@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-20 16:53 IST (attachment fetch: disk-first via open_webui.__file__, Beta-safe regardless of OWUI port)"""
+"""# Last synced to OWUI DB: 2026-04-20 18:09 IST (per-request cache reset: new attachment set -> wipes _IMAGE_STORE + _EXTRACT_CACHE so no prior-document images bleed through)"""
 import re
 import json
 import base64
@@ -274,6 +274,15 @@ class _ImageStore:
             k = _unpinned_oldest()
             if not k: break
             del self._store[k]
+    def reset(self, purge_pinned: bool = False):
+        """Wipe the store. By default only non-pinned entries go; pass
+        purge_pinned=True to nuke everything (used when a new attachment
+        set arrives so no image from a previous document bleeds through)."""
+        with self._lock:
+            if purge_pinned:
+                self._store.clear()
+            else:
+                self._store = {k: v for k, v in self._store.items() if v.get("pinned")}
 _IMAGE_STORE = _ImageStore()
 class _ExtractionCache:
     TTL_SECONDS = 3600
@@ -303,6 +312,9 @@ class _ExtractionCache:
             while len(self._store) > self.MAX_ENTRIES:
                 oldest = min(self._store.keys(), key=lambda k: self._store[k]["t"])
                 del self._store[oldest]
+    def reset(self):
+        with self._lock:
+            self._store.clear()
 _EXTRACT_CACHE = _ExtractionCache()
 class _DocBuffer:
     TTL_SECONDS = 600
@@ -1046,6 +1058,9 @@ class Tools:
                     "error": "No attachment_file_ids provided and no files attached to chat.",
                     "text_chunks": [], "images": []
                 })
+            if self._reset_caches_if_new_attachments(attachment_file_ids, __event_emitter__):
+                await self._emit(__event_emitter__,
+                    "♻️ New attachment set — cleared old image cache")
             await self._emit(__event_emitter__, f"📎 Processing {len(attachment_file_ids)} attachment(s)...")
             _hb = self._start_heartbeat(__event_emitter__, eta_seconds=self._eta_for('prepare_content_from_attachments'), initial_phase='📎 Extracting from attachments')
             auth = self._auth_from_request(__request__)
@@ -1407,6 +1422,9 @@ class Tools:
                 all_images.extend(self._extract_from_collection(tc, cf, auth))
                 source_log.append(f"knowledge:{knowledge_collection_id}")
             if attachment_file_ids:
+                if self._reset_caches_if_new_attachments(attachment_file_ids, __event_emitter__):
+                    await self._emit(__event_emitter__,
+                        "♻️ New attachment set — cleared old image cache")
                 await self._emit(__event_emitter__, f"📎 {len(attachment_file_ids)} attachment(s)...")
                 tc, ti = await asyncio.to_thread(
                     self._extract_attachments_parallel, attachment_file_ids, auth, 4
@@ -2985,6 +3003,19 @@ class Tools:
         except Exception as e:
             print(f"[DocGen] kb image compress failed, using raw: {e}")
             return raw_bytes, "png"
+    def _reset_caches_if_new_attachments(self, file_ids, event_emitter=None):
+        """Detect a new attachment set vs the last call and wipe old images +
+        extraction cache so nothing from a prior document bleeds into this one.
+        Returns True when a reset actually happened."""
+        key = tuple(sorted((file_ids or [])))
+        last = getattr(self, "_last_attachment_key", None)
+        if key and key != last:
+            _IMAGE_STORE.reset(purge_pinned=True)
+            _EXTRACT_CACHE.reset()
+            self._last_attachment_key = key
+            print(f"[DocGen] cache reset: new attachment set {list(key)[:3]}...")
+            return True
+        return False
     def _fetch_attachment_bytes(self, file_ids, auth):
         """Beta-safe attachment loader. Reuses _fetch_file_metadata / _fetch_file_bytes
         which already try local OWUI data/uploads/ on disk (dynamically located via
@@ -3218,6 +3249,10 @@ class Tools:
         """Enrich each section with a KB match (Plan B first, Plan C fallback). 95 threshold."""
         if not file_ids or not self.valves.enable_kb_vision_layout or not sections:
             return sections
+        if self._reset_caches_if_new_attachments(file_ids, __event_emitter__):
+            try: await self._emit(__event_emitter__,
+                "♻️ Fresh attachment set — cleared KB image cache so no prior-document images bleed through")
+            except Exception: pass
         try: await self._emit(__event_emitter__, f"📎 Indexing {len(file_ids)} attachment(s) for 50/50 layout...")
         except Exception: pass
         attachments = await asyncio.to_thread(self._fetch_attachment_bytes, file_ids, auth)
