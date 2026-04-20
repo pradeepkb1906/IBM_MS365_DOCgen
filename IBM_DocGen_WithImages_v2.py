@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-20 14:42 IST (figure-only filter: rejects logos/icons/banners/headers, prefers architecture/devops/infra/component/sequence diagrams)"""
+"""# Last synced to OWUI DB: 2026-04-20 16:53 IST (attachment fetch: disk-first via open_webui.__file__, Beta-safe regardless of OWUI port)"""
 import re
 import json
 import base64
@@ -2986,19 +2986,24 @@ class Tools:
             print(f"[DocGen] kb image compress failed, using raw: {e}")
             return raw_bytes, "png"
     def _fetch_attachment_bytes(self, file_ids, auth):
+        """Beta-safe attachment loader. Reuses _fetch_file_metadata / _fetch_file_bytes
+        which already try local OWUI data/uploads/ on disk (dynamically located via
+        open_webui.__file__) BEFORE falling back to HTTP at owui_base_url. So this
+        works even if the Beta OWUI isn't listening on localhost:8080 — the file bytes
+        come straight from disk via the shared filesystem inside the OWUI container."""
         out = []
-        base = self.valves.owui_base_url
-        h = {**(auth or {})}
         for fid in file_ids or []:
             try:
-                meta_r = requests.get(f"{base}/api/v1/files/{fid}", headers=h, timeout=10)
-                fname = (meta_r.json().get("filename") or fid) if meta_r.ok else fid
+                meta = self._fetch_file_metadata(fid, auth or {})
+                fname = (meta or {}).get("name") or fid
                 ext = ("." + fname.rsplit(".", 1)[-1].lower()) if "." in fname else ""
-                if ext not in (".pdf", ".docx", ".pptx", ".xlsx"): continue
-                r = requests.get(f"{base}/api/v1/files/{fid}/content", headers=h,
-                                 timeout=self.valves.request_timeout)
-                if r.status_code == 200 and r.content:
-                    out.append((fname, ext, r.content))
+                if ext not in (".pdf", ".docx", ".pptx", ".xlsx"):
+                    continue
+                data = self._fetch_file_bytes(fid, auth or {})
+                if data:
+                    out.append((fname, ext, data))
+                else:
+                    print(f"[DocGen] attachment {fid} ({fname}): no bytes returned")
             except Exception as e:
                 print(f"[DocGen] fetch attachment {fid} failed: {e}")
         return out
