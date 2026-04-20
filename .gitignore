@@ -30,3 +30,10 @@ CLAUDE.md
 *.secret
 *.key
 .env*
+
+# Beta credentials — never commit
+.env.local
+.env
+ICA_BETA_API_KEY
+*_api_key*
+push_to_beta.log
