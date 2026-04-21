@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-21 06:47 IST (stacked layout: text full-width, image centered below — no more 50/50 horizontal split)"""
+"""# Last synced to OWUI DB: 2026-04-21 07:03 IST (PDF embedded image extraction: fitz + pypdf fallback; DOCX/PPTX/PDF all extract individual figures)"""
 import re
 import json
 import base64
@@ -2519,27 +2519,75 @@ class Tools:
         if pdf: return self._render_pdf_pages(pdf, src)
         return []
     def _extract_pdf_images(self, pdf_bytes: bytes, src: dict) -> list[dict]:
+        """Extract embedded images (XObject Image streams) from a PDF.
+        Tier 1: PyMuPDF (fitz) — richest metadata incl. bbox captions.
+        Tier 2: pypdf (pure-Python) — Beta-safe fallback.
+        Returns records shaped like _extract_office_images output."""
         out = []
-        if not HAS_FITZ:
-            print("[DocGen] PDF image extraction skipped — PyMuPDF not installed in this environment.")
-            return out
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if HAS_FITZ:
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                try:
+                    for page_num, page in enumerate(doc):
+                        for img_idx, img in enumerate(page.get_images(full=True)):
+                            xref = img[0]
+                            try:
+                                base = doc.extract_image(xref)
+                                pil = Image.open(io.BytesIO(base["image"])).convert("RGB")
+                            except Exception: continue
+                            if not self._passes_filter(pil): continue
+                            caption = self._pdf_caption(page, img)
+                            context = page.get_text("text")[:800]
+                            rec = self._store_image(pil, src, caption, context,
+                                                     f"page {page_num+1}", f"p{page_num}_i{img_idx}")
+                            if rec: out.append(rec)
+                finally:
+                    doc.close()
+                return out
+            except Exception as e:
+                print(f"[DocGen] fitz PDF extract failed, trying pypdf: {e}")
+        # Fallback: pypdf (pure Python, usually pre-installed)
         try:
-            for page_num, page in enumerate(doc):
-                for img_idx, img in enumerate(page.get_images(full=True)):
-                    xref = img[0]
+            import pypdf
+        except Exception:
+            print("[DocGen] PDF image extraction skipped — neither PyMuPDF nor pypdf available.")
+            return out
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            for page_num, page in enumerate(reader.pages):
+                try:
+                    text = (page.extract_text() or "")[:800]
+                except Exception: text = ""
+                try:
+                    page_images = list(page.images)   # pypdf ≥ 4.0
+                except Exception:
+                    continue
+                for img_idx, pyimg in enumerate(page_images):
                     try:
-                        base = doc.extract_image(xref)
-                        pil = Image.open(io.BytesIO(base["image"])).convert("RGB")
+                        pil = Image.open(io.BytesIO(pyimg.data)).convert("RGB")
                     except Exception: continue
                     if not self._passes_filter(pil): continue
-                    caption = self._pdf_caption(page, img)
-                    context = page.get_text("text")[:800]
-                    rec = self._store_image(pil, src, caption, context,
+                    caption = getattr(pyimg, "name", "") or f"page {page_num+1} fig {img_idx+1}"
+                    rec = self._store_image(pil, src, caption, text,
                                              f"page {page_num+1}", f"p{page_num}_i{img_idx}")
                     if rec: out.append(rec)
-        finally:
-            doc.close()
+        except Exception as e:
+            print(f"[DocGen] pypdf PDF extract failed: {e}")
+        return out
+    def _pdf_embedded_images_for_kb(self, pdf_bytes: bytes, source_file: str) -> list[dict]:
+        """Shape embedded-image records to match _extract_office_images output
+        (what _bm25_prefilter + _plan_c_match expect). Used in KB enrichment."""
+        out = []
+        src = {"source": source_file, "ext": ".pdf", "doc_type": "pdf"}
+        recs = self._extract_pdf_images(pdf_bytes, src)
+        for r in recs:
+            img_bytes = _IMAGE_STORE.get_bytes(r["id"]) if isinstance(r, dict) else None
+            if not img_bytes: continue
+            ctx = (r.get("caption", "") + " " + r.get("context", ""))[:2500]
+            out.append({"id": f"{source_file}:{r['id']}", "bytes": img_bytes,
+                        "source_file": source_file,
+                        "page": int((r.get("location") or "page 0").split()[-1]) if "page" in (r.get("location") or "") else 0,
+                        "caption_seed": ctx})
         return out
     def _pdf_caption(self, page, img) -> str:
         try:
@@ -3368,16 +3416,26 @@ class Tools:
         pdfs = [a for a in attachments if a[1] == ".pdf"]
         office = [a for a in attachments if a[1] in (".docx", ".pptx", ".xlsx")]
         office_images = await asyncio.to_thread(self._extract_office_images, office) if office else []
-        # Also render each PDF page as an image snapshot (pypdfium2 / fitz — auto-skipped on Beta if missing)
+        # PDFs — extract BOTH: (a) individual embedded images via fitz/pypdf,
+        # (b) full page snapshots via pypdfium2 when neither can find any embedded.
+        # Claude Vision then picks whichever is most relevant per section.
+        embedded_pdf_count = 0
+        snapshot_pdf_count = 0
         for fname, _e, data in pdfs:
+            # (a) Embedded images (actual figures/diagrams extracted from the PDF)
+            embedded = await asyncio.to_thread(self._pdf_embedded_images_for_kb, data, fname)
+            office_images.extend(embedded)
+            embedded_pdf_count += len(embedded)
+            # (b) Page snapshots (full-page rasters — fallback + complement)
             pages = await asyncio.to_thread(self._pdf_pages_as_images, data, 20, 1.5)
             for p in pages:
                 p["source_file"] = fname
                 p["id"] = f"{fname}:page{p['page']}"
             office_images.extend(pages)
-        if pdfs and office_images and any(p.get("page") for p in office_images):
+            snapshot_pdf_count += len(pages)
+        if pdfs:
             try: await self._emit(__event_emitter__,
-                f"📸 Rendered {sum(1 for p in office_images if p.get('page'))} PDF page snapshot(s)")
+                f"📄 PDF: {embedded_pdf_count} embedded figure(s) + {snapshot_pdf_count} page snapshot(s)")
             except Exception: pass
         # Probe Plan B once
         plan_b_ok = False
