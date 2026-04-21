@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-20 20:13 IST (per-chat cache isolation ChatGPT/Claude-style: images tagged with session_id, wipe only the affected chat)"""
+"""# Last synced to OWUI DB: 2026-04-21 06:47 IST (stacked layout: text full-width, image centered below — no more 50/50 horizontal split)"""
 import re
 import json
 import base64
@@ -3844,9 +3844,11 @@ class Tools:
             align="left", after=120
         ))
         doc_parts.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
-        def kb_right_cell_xml(kb):
-            """Build the inner XML of the right cell: embedded image + caption."""
-            parts = []
+        def add_kb_image_inline(kb):
+            """Inject the KB image as a CENTERED inline block below whatever text
+            already occupies the page — no table, no 2-column split. Returns
+            a list of w:p XML strings to append after the section's text/bullets/table."""
+            out = []
             idx = len(media_files)
             img_ext = kb.get("image_ext", "jpg")
             fn = f"kb_image_{idx+1}.{img_ext}"
@@ -3857,9 +3859,10 @@ class Tools:
                 f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
                 f'Target="media/{fn}"/>'
             )
-            w_emu, h_emu = 3200000, 2400000
-            parts.append(
-                '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+            # 5.5" × 3.1" — full-width-friendly for an 8.5" page with 1" margins
+            w_emu, h_emu = 5029200, 2835900
+            out.append(
+                '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="240" w:after="60"/></w:pPr>'
                 '<w:r><w:drawing>'
                 '<wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
                 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
@@ -3878,49 +3881,12 @@ class Tools:
                 '</pic:spPr></pic:pic></a:graphicData></a:graphic>'
                 '</wp:inline></w:drawing></w:r></w:p>'
             )
-            cap = f"{kb.get('caption','')}  ·  {kb.get('source_file','KB')}"[:160]
-            parts.append(para_xml(run_xml(cap, size=16, italic=True, color="525252"),
-                                   align="center", after=60))
-            return "".join(parts)
-        def kb_2col_section_xml(section, kb):
-            """Whole section wrapped as 50/50 w:tbl: left = text, right = image/card."""
-            left = []
-            left.append(heading_xml(section.get("title", ""), level=1))
-            for p in section.get("paragraphs", []) or []:
-                left.append(para_xml(run_xml(p, size=22), align="both"))
-            for b in section.get("bullets", []) or []:
-                left.append(
-                    f'<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'
-                    f'<w:ind w:left="360"/></w:pPr>{run_xml("• " + str(b), size=22)}</w:p>'
-                )
-            if section.get("table"):
-                t = section["table"]
-                left.append(table_xml(t.get("headers", []), t.get("rows", [])))
-            return (
-                '<w:tbl>'
-                '<w:tblPr><w:tblW w:w="5000" w:type="pct"/>'
-                '<w:tblBorders><w:top w:val="nil"/><w:bottom w:val="nil"/><w:left w:val="nil"/>'
-                '<w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>'
-                '</w:tblPr>'
-                '<w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>'
-                '<w:tr>'
-                '<w:tc><w:tcPr><w:tcW w:w="2500" w:type="pct"/></w:tcPr>'
-                + "".join(left) +
-                '</w:tc>'
-                '<w:tc><w:tcPr><w:tcW w:w="2500" w:type="pct"/></w:tcPr>'
-                + kb_right_cell_xml(kb) +
-                '</w:tc>'
-                '</w:tr></w:tbl>'
-            )
+            cap = f"📎 {kb.get('caption','')}  ·  from {kb.get('source_file','KB')}"[:160]
+            out.append(para_xml(run_xml(cap, size=16, italic=True, color="525252"),
+                                 align="center", after=240))
+            return out
         for idx, section in enumerate(sections, start=1):
-            if section.get("_kb_match"):
-                doc_parts.append(kb_2col_section_xml(section, section["_kb_match"]))
-                src_line = self._format_sources_line(section)
-                if src_line:
-                    doc_parts.append(para_xml(run_xml(src_line, size=16, italic=True,
-                                                       color="525252"), align="left", after=120))
-                doc_parts.append(para_xml("", after=240))
-                continue
+            # Unified inline flow: heading → paragraphs → bullets → table → image → caption → source
             sec_title = section.get("title", f"Section {idx}")
             doc_parts.append(heading_xml(sec_title, level=1))
             for para in section.get("paragraphs", []) or []:
@@ -3935,7 +3901,11 @@ class Tools:
                 t = section["table"]
                 doc_parts.append(table_xml(t.get("headers", []), t.get("rows", [])))
                 doc_parts.append(para_xml("", after=120))
-            if section.get("_img_bytes"):
+            # Image slot — KB match first, then explicit _img_bytes, else chart
+            if section.get("_kb_match"):
+                for xml in add_kb_image_inline(section["_kb_match"]):
+                    doc_parts.append(xml)
+            elif section.get("_img_bytes"):
                 add_image_xml(
                     section["_img_bytes"],
                     section.get("_img_width", 1200),
@@ -4176,20 +4146,22 @@ class Tools:
                 )
             page_num = idx + 1
             kb = section.get("_kb_match")
+            # Stacked flow: text first (parts), image centered below it
+            page_body = "".join(parts)
             if kb and kb.get("image_bytes"):
                 mime = "image/jpeg" if kb.get("image_ext", "jpg") in ("jpg", "jpeg") else "image/png"
                 img_b64 = base64.b64encode(kb["image_bytes"]).decode()
-                right = (f'<img src="data:{mime};base64,{img_b64}" '
-                         f'loading="lazy" decoding="async" fetchpriority="low" '
-                         f'style="max-width:100%;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.1)"/>'
-                         f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
-                         f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
-                page_body = (f'<div style="display:flex;gap:24px">'
-                             f'<div style="flex:1;min-width:0">{"".join(parts)}</div>'
-                             f'<div style="flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center">{right}</div>'
-                             f'</div>')
-            else:
-                page_body = "".join(parts)
+                page_body += (
+                    f'<div style="text-align:center;margin:24px 0 12px">'
+                    f'<img src="data:{mime};base64,{img_b64}" '
+                    f'loading="lazy" decoding="async" fetchpriority="low" '
+                    f'style="max-width:85%;max-height:360px;border-radius:4px;'
+                    f'box-shadow:0 2px 8px rgba(0,0,0,0.1)"/>'
+                    f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px">'
+                    f'📎 {self._html_esc(kb.get("caption",""))}  ·  '
+                    f'{self._html_esc(kb.get("source_file",""))}</div>'
+                    f'</div>'
+                )
             src_line = self._format_sources_line(section)
             if src_line:
                 page_body += (f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:14px;'
@@ -5229,10 +5201,11 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
             has_kb = bool(section.get("_kb_match"))
             has_chart = bool(section.get("_chart_spec"))
             has_image = bool(section.get("_img_bytes")) or has_chart or has_kb
+            # NEW stacked layout: text takes full width on top, image centered below.
             text_x = 457200
             text_y = 1143000
-            text_w = 5943600 if has_image else 11277600
-            text_h = 5334000
+            text_w = 11277600                                       # full slide width minus margins
+            text_h = 3100000 if has_image else 5334000              # leave room at bottom for image
             paras = section.get("paragraphs", []) or []
             bullets = section.get("bullets", []) or []
             if paras or bullets:
@@ -5256,7 +5229,11 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
                 )
             if has_kb:
                 kb = section["_kb_match"]
-                ch_x, ch_y, ch_w = 6629400, 1143000, 5105400
+                # Image centered horizontally, placed BELOW the text block.
+                img_w = 6400000            # ~7.0" wide (keeps 16:9 framing)
+                img_h = 2200000            # ~2.4" tall
+                img_x = (SLIDE_W_EMU - img_w) // 2   # center
+                img_y = text_y + text_h + 200000     # just below text with 0.22" gap
                 media_idx = len(media_files)
                 img_ext = kb.get("image_ext", "jpg")
                 fname_kb = f"kb_image_{media_idx+1}.{img_ext}"
@@ -5267,10 +5244,10 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
                     f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
                     f'Target="../media/{fname_kb}"/>'
                 )
-                shapes.append(image_xml(rid, ch_x, ch_y, ch_w, 3600000))
+                shapes.append(image_xml(rid, img_x, img_y, img_w, img_h))
                 cap = (f"📎 {kb.get('caption','')}  ·  from {kb.get('source_file','KB')}")[:120]
-                shapes.append(txt_box(ch_x, ch_y + 3600000 + 50000, ch_w, 400000,
-                                       cap, size=900, color="525252"))
+                shapes.append(txt_box(img_x, img_y + img_h + 30000, img_w, 300000,
+                                       cap, size=900, color="525252", align="ctr"))
             elif has_chart:
                 ch_x = 6629400
                 ch_y = 1143000
@@ -5548,67 +5525,64 @@ if((e.ctrlKey||e.metaKey)&&e.key==="0")e.preventDefault()||zoomReset()}});
             has_kb = bool(section.get("_kb_match"))
             has_chart = bool(section.get("_chart_spec"))
             has_img = bool(section.get("_img_bytes")) or has_chart or has_kb
-            text_col_w = "50%" if has_img else "100%"
-            text_html = f'<h2 style="font-size:26px;color:{IBM_GRAY_100};font-weight:700;margin:0 0 16px">{self._html_esc(section.get("title", ""))}</h2>'
+            text_html = f'<h2 style="font-size:24px;color:{IBM_GRAY_100};font-weight:700;margin:0 0 14px">{self._html_esc(section.get("title", ""))}</h2>'
             for p in section.get("paragraphs", []) or []:
-                text_html += f'<p style="font-size:13px;color:{IBM_GRAY_100};margin:8px 0;line-height:1.7">{self._html_esc(p)}</p>'
+                text_html += f'<p style="font-size:12px;color:{IBM_GRAY_100};margin:6px 0;line-height:1.55">{self._html_esc(p)}</p>'
             bullets = section.get("bullets", []) or []
             if bullets:
                 lis = "".join(
-                    f'<li style="font-size:13px;color:{IBM_GRAY_100};margin:4px 0">{self._html_esc(b)}</li>'
+                    f'<li style="font-size:12px;color:{IBM_GRAY_100};margin:3px 0">{self._html_esc(b)}</li>'
                     for b in bullets
                 )
-                text_html += f'<ul style="padding-left:20px;margin:8px 0">{lis}</ul>'
-            src_line = self._format_sources_line(section)
-            if src_line:
-                text_html += (f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:12px;'
-                              f'border-top:1px dashed {IBM_GRAY_20};padding-top:6px">'
-                              f'📚 {self._html_esc(src_line)}</div>')
-            img_html = ""
+                text_html += f'<ul style="padding-left:20px;margin:6px 0">{lis}</ul>'
+            # Build image block (now placed BELOW the text, centered)
+            img_block = ""
             if has_kb:
                 kb = section["_kb_match"]
                 mime = "image/jpeg" if kb.get("image_ext", "jpg") in ("jpg", "jpeg") else "image/png"
                 b64 = base64.b64encode(kb["image_bytes"]).decode()
-                inner = (f'<img src="data:{mime};base64,{b64}" '
-                         f'loading="lazy" decoding="async" fetchpriority="low" '
-                         f'style="max-width:100%;max-height:55vh;border-radius:4px;object-fit:contain"/>'
-                         f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
-                         f'📎 {self._html_esc(kb.get("caption",""))}  ·  {self._html_esc(kb.get("source_file",""))}</div>')
-                img_html = (f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
-                            f'{inner}</div>')
+                img_block = (
+                    f'<div style="text-align:center;margin:10px auto 0">'
+                    f'<img src="data:{mime};base64,{b64}" '
+                    f'loading="lazy" decoding="async" fetchpriority="low" '
+                    f'style="max-width:75%;max-height:32vh;border-radius:4px;object-fit:contain"/>'
+                    f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:6px">'
+                    f'📎 {self._html_esc(kb.get("caption",""))}  ·  '
+                    f'{self._html_esc(kb.get("source_file",""))}</div>'
+                    f'</div>'
+                )
             elif has_chart:
-                svg = self._svg_chart_from_spec(section["_chart_spec"], width=520, height=300)
-                img_html = (
-                    f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
-                    f'{svg}'
-                    + (
-                        f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
-                        f'Chart — {self._html_esc(section.get("image_caption") or "")}</div>'
-                        if section.get("image_caption") else ""
-                    )
+                svg = self._svg_chart_from_spec(section["_chart_spec"], width=560, height=280)
+                cap_txt = section.get("image_caption") or ""
+                img_block = (
+                    f'<div style="text-align:center;margin:10px auto 0">{svg}'
+                    + (f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:6px">'
+                       f'Chart — {self._html_esc(cap_txt)}</div>' if cap_txt else "")
                     + '</div>'
                 )
             elif section.get("_img_bytes"):
                 img_b64 = base64.b64encode(section["_img_bytes"]).decode()
-                img_html = (
-                    f'<div style="flex:0 0 46%;padding-left:20px;display:flex;flex-direction:column;justify-content:center">'
+                cap_txt = section.get("image_caption") or ""
+                img_block = (
+                    f'<div style="text-align:center;margin:10px auto 0">'
                     f'<img src="data:image/png;base64,{img_b64}" '
-                    f'style="max-width:100%;max-height:60vh;height:auto;border-radius:4px;object-fit:contain"/>'
-                    + (
-                        f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:8px;text-align:center">'
-                        f'Figure — {self._html_esc(section.get("image_caption") or "")}</div>'
-                        if section.get("image_caption") else ""
-                    )
+                    f'style="max-width:75%;max-height:32vh;border-radius:4px;object-fit:contain"/>'
+                    + (f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:6px">'
+                       f'Figure — {self._html_esc(cap_txt)}</div>' if cap_txt else "")
                     + '</div>'
                 )
+            src_line = self._format_sources_line(section)
+            src_html = ""
+            if src_line:
+                src_html = (f'<div style="font-size:10px;color:{IBM_GRAY_70};font-style:italic;margin-top:10px;'
+                            f'border-top:1px dashed {IBM_GRAY_20};padding-top:5px">'
+                            f'📚 {self._html_esc(src_line)}</div>')
             slide_parts.append(
                 f'<div class="sl" style="display:none;aspect-ratio:16/9;background:#fff;'
-                f'border-left:8px solid {IBM_BLUE_60};padding:40px 48px;font-family:\"IBM Plex Sans\",Calibri,sans-serif;'
-                f'position:relative">'
-                f'<div style="display:flex;height:100%">'
-                f'<div style="flex:1 1 {text_col_w};padding-right:16px">{text_html}</div>'
-                f'{img_html}'
-                f'</div></div>'
+                f'border-left:8px solid {IBM_BLUE_60};padding:32px 40px;'
+                f'font-family:\"IBM Plex Sans\",Calibri,sans-serif;position:relative;overflow:hidden">'
+                f'<div style="height:100%;overflow:auto">{text_html}{img_block}{src_html}</div>'
+                f'</div>'
             )
         total = len(slide_parts)
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
