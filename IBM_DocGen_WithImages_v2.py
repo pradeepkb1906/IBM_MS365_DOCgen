@@ -1,4 +1,4 @@
-"""# Last synced to OWUI DB: 2026-04-21 07:03 IST (PDF embedded image extraction: fitz + pypdf fallback; DOCX/PPTX/PDF all extract individual figures)"""
+"""# Last synced to OWUI DB: 2026-04-21 10:00 IST (PDF embedded image extraction end-to-end verified: fitz + pypdf tiers, no _IMAGE_STORE detour)"""
 import re
 import json
 import base64
@@ -2575,19 +2575,65 @@ class Tools:
             print(f"[DocGen] pypdf PDF extract failed: {e}")
         return out
     def _pdf_embedded_images_for_kb(self, pdf_bytes: bytes, source_file: str) -> list[dict]:
-        """Shape embedded-image records to match _extract_office_images output
-        (what _bm25_prefilter + _plan_c_match expect). Used in KB enrichment."""
+        """Extract embedded images from a PDF in the SAME shape _extract_office_images
+        returns — straight into the BM25/Vision pipeline with no _IMAGE_STORE detour.
+        Tier 1: fitz (PyMuPDF). Tier 2: pypdf (pure-Python, Beta-safe)."""
         out = []
-        src = {"source": source_file, "ext": ".pdf", "doc_type": "pdf"}
-        recs = self._extract_pdf_images(pdf_bytes, src)
-        for r in recs:
-            img_bytes = _IMAGE_STORE.get_bytes(r["id"]) if isinstance(r, dict) else None
-            if not img_bytes: continue
-            ctx = (r.get("caption", "") + " " + r.get("context", ""))[:2500]
-            out.append({"id": f"{source_file}:{r['id']}", "bytes": img_bytes,
-                        "source_file": source_file,
-                        "page": int((r.get("location") or "page 0").split()[-1]) if "page" in (r.get("location") or "") else 0,
-                        "caption_seed": ctx})
+        # Tier 1: fitz (richer — includes image-bbox caption extraction)
+        if HAS_FITZ:
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                try:
+                    for page_num, page in enumerate(doc):
+                        try: page_text = page.get_text("text")[:1200]
+                        except Exception: page_text = ""
+                        for img_idx, img in enumerate(page.get_images(full=True)):
+                            try:
+                                base = doc.extract_image(img[0])
+                                pil = Image.open(io.BytesIO(base["image"])).convert("RGB")
+                            except Exception: continue
+                            if not self._passes_filter(pil): continue
+                            buf = io.BytesIO(); pil.save(buf, format="PNG", optimize=True)
+                            png = buf.getvalue()
+                            cap = ""
+                            try: cap = self._pdf_caption(page, img) or ""
+                            except Exception: pass
+                            ctx = (f"{cap}  {page_text}").strip()[:2500]
+                            out.append({"id": f"{source_file}:p{page_num+1}_i{img_idx}",
+                                        "bytes": png, "source_file": source_file,
+                                        "page": page_num + 1, "caption_seed": ctx})
+                finally:
+                    doc.close()
+                if out: return out
+            except Exception as e:
+                print(f"[DocGen] fitz PDF kb-extract failed, trying pypdf: {e}")
+        # Tier 2: pypdf — pure Python, works on Beta without fitz
+        try:
+            import pypdf
+        except Exception:
+            print("[DocGen] PDF image extraction skipped — neither PyMuPDF nor pypdf available.")
+            return out
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            for page_num, page in enumerate(reader.pages):
+                try: text = (page.extract_text() or "")[:1200]
+                except Exception: text = ""
+                try: page_images = list(page.images)
+                except Exception: continue
+                for img_idx, pyimg in enumerate(page_images):
+                    try:
+                        pil = Image.open(io.BytesIO(pyimg.data)).convert("RGB")
+                    except Exception: continue
+                    if not self._passes_filter(pil): continue
+                    buf = io.BytesIO(); pil.save(buf, format="PNG", optimize=True)
+                    png = buf.getvalue()
+                    name_hint = getattr(pyimg, "name", "") or ""
+                    ctx = (f"{name_hint}  {text}").strip()[:2500]
+                    out.append({"id": f"{source_file}:p{page_num+1}_i{img_idx}",
+                                "bytes": png, "source_file": source_file,
+                                "page": page_num + 1, "caption_seed": ctx})
+        except Exception as e:
+            print(f"[DocGen] pypdf PDF kb-extract failed: {e}")
         return out
     def _pdf_caption(self, page, img) -> str:
         try:
